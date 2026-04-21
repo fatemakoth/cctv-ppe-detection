@@ -11,8 +11,9 @@ ALERT_HEIGHT_CM   = 185    # head above this = RED
 MIN_CONFIDENCE    = 0.50
 MIN_BOX_HEIGHT_PX = 80
 MIN_ASPECT_RATIO  = 0.6
-FOOT_CONF_MIN     = 0.40   # min keypoint confidence to trust ankle position
-FOOT_TOLERANCE    = 0.18   # ankles must be within this fraction of box height from floor
+FOOT_CONF_MIN              = 0.40   # min keypoint confidence to trust ankle position
+FOOT_ELEVATION_THRESHOLD_CM = 28   # ankles more than this many cm above floor_y → off floor
+                                    # raise if far-back people false-trigger; lower to catch low chairs
 
 LEFT_ANKLE  = 15
 RIGHT_ANKLE = 16
@@ -51,16 +52,19 @@ def draw_overlay(frame, floor_y, pixels_per_cm):
                     (10, alert_y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
 
 
-def check_feet(kps, y1, y2, floor_y):
+def check_feet(kps, floor_y, pixels_per_cm):
     """
     Use YOLOv8-pose ankle keypoints (global frame coords) to check if feet are on the floor.
-    Returns: True (on floor), False (feet off floor), None (ankles not visible / inconclusive)
+    Returns: (on_floor: bool | None, ankle_height_cm: float | None)
+      on_floor = True  → on floor
+      on_floor = False → feet off floor (elevated)
+      on_floor = None  → ankles not visible / inconclusive
     """
     if kps is None or kps.data is None or len(kps.data) == 0:
-        return None
+        return None, None
 
-    kp_data  = kps.data[0]   # shape [17, 3] — x, y, confidence
-    foot_ys  = []
+    kp_data = kps.data[0]   # shape [17, 3] — x, y, confidence
+    foot_ys = []
 
     for idx in [LEFT_ANKLE, RIGHT_ANKLE]:
         kp   = kp_data[idx]
@@ -69,20 +73,15 @@ def check_feet(kps, y1, y2, floor_y):
             foot_ys.append(float(kp[1]))
 
     if not foot_ys:
-        return None   # ankles not visible — inconclusive
+        return None, None   # ankles not visible — inconclusive
 
-    avg_foot_y = sum(foot_ys) / len(foot_ys)
-    box_h      = y2 - y1
+    avg_foot_y      = sum(foot_ys) / len(foot_ys)
+    ankle_height_cm = (floor_y - avg_foot_y) / pixels_per_cm   # positive = above floor
 
-    # Clamp floor reference to bounding box bottom — handles far-away people where
-    # the calibrated floor_y sits below their bounding box due to perspective
-    effective_floor_y = min(floor_y, y2)
-    tolerance_px      = box_h * FOOT_TOLERANCE
-
-    return avg_foot_y >= (effective_floor_y - tolerance_px)
+    return ankle_height_cm <= FOOT_ELEVATION_THRESHOLD_CM, ankle_height_cm
 
 
-def draw_ankle_dots(frame, kps, color):
+def draw_ankle_dots(frame, kps, ankle_height_cm):
     if kps is None or kps.data is None or len(kps.data) == 0:
         return
     kp_data = kps.data[0]
@@ -92,8 +91,9 @@ def draw_ankle_dots(frame, kps, color):
         if conf >= FOOT_CONF_MIN:
             px, py = int(float(kp[0])), int(float(kp[1]))
             cv2.circle(frame, (px, py), 7, (0, 255, 255), -1)
-            cv2.putText(frame, f"{conf:.0%}", (px + 6, py),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 255), 1)
+            label = f"{ankle_height_cm:.0f}cm" if ankle_height_cm is not None else f"{conf:.0%}"
+            cv2.putText(frame, label, (px + 6, py),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 255, 255), 1)
 
 
 def classify(x1, y1, x2, y2, floor_y, pixels_per_cm, feet_on_floor):
@@ -208,13 +208,13 @@ def run(source):
                 continue
 
             # Ankle keypoints from pose model (global frame coordinates)
-            kps         = results.keypoints[i] if results.keypoints is not None else None
-            feet_status = check_feet(kps, y1b, y2b, floor_y)
+            kps                    = results.keypoints[i] if results.keypoints is not None else None
+            feet_status, ankle_h   = check_feet(kps, floor_y, pixels_per_cm)
 
             person_id += 1
             info = classify(x1, y1b, x2, y2b, floor_y, pixels_per_cm, feet_status)
             draw_person(frame, x1, y1b, x2, y2b, info, person_id)
-            draw_ankle_dots(frame, kps, (0, 255, 255))
+            draw_ankle_dots(frame, kps, ankle_h)
 
             if info["state"] == "elevated":
                 alert_count += 1
