@@ -17,8 +17,8 @@ NO_VEST        = "NO-Safety Vest"
 
 PPE_CONF         = 0.30   # lower threshold — PPE on a crop is harder to detect
 PERSON_CONF      = 0.50
-MIN_BODY_HEIGHT_CM = 120  # skip partial/truncated detections (same logic as height_detection)
-MIN_ASPECT_RATIO   = 1.2  # person boxes are taller than wide
+MIN_BOX_HEIGHT_PX = 80   # pixel-based — works at any distance unlike cm threshold
+MIN_ASPECT_RATIO  = 0.6  # allow bent poses; only rejects nearly-horizontal blobs
 
 def open_capture(source):
     if not (isinstance(source, str) and source.startswith("rtsp")):
@@ -145,11 +145,8 @@ def run(source):
             if box_w == 0 or box_h == 0:
                 continue
 
-            # Skip partial/truncated detections and non-person shapes
-            pixels_per_cm = cal.get("pixels_per_cm", 4.0) if cal else 4.0
-            body_cm = box_h / pixels_per_cm
-            aspect  = box_h / box_w
-            if body_cm < MIN_BODY_HEIGHT_CM or aspect < MIN_ASPECT_RATIO:
+            aspect = box_h / box_w
+            if box_h < MIN_BOX_HEIGHT_PX or aspect < MIN_ASPECT_RATIO:
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (80, 80, 80), 1)
                 continue
 

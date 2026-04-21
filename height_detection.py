@@ -9,9 +9,10 @@ CALIBRATION_FILE = "calibration.json"
 PERSON_CLASS_ID = 0
 ALERT_HEIGHT_CM = 185       # head must be above this to trigger RED alert
 FLOOR_TOLERANCE_CM = 30     # feet within 30cm of calibrated floor = on the floor
-MIN_CONFIDENCE = 0.50       # ignore low-confidence detections (filters coat/objects)
-MIN_BODY_HEIGHT_CM = 120    # ignore boxes where body < 120cm — partial/truncated detection
-MIN_ASPECT_RATIO = 1.2      # height/width ratio — people are taller than wide
+MIN_CONFIDENCE = 0.50    # ignore low-confidence detections (primary filter for coats/objects)
+MIN_BOX_HEIGHT_PX = 80   # minimum bounding box height in pixels — filters tiny false detections
+                          # pixel-based so it works at any distance, unlike a cm threshold
+MIN_ASPECT_RATIO = 0.6   # allow bent/crouching poses — only rejects nearly-horizontal blobs
 
 
 def load_calibration():
@@ -112,13 +113,15 @@ def run(source):
     floor_y = cal["floor_y"]
     pixels_per_cm = cal["pixels_per_cm"]
 
-    model = YOLO("yolov8s.pt")
-    print("[INFO] YOLOv8s loaded. Press 'q' to quit.")
+    model = YOLO("yolov8n.pt")
+    print("[INFO] YOLOv8n loaded. Press 'q' to quit.")
 
     cap = open_capture(source)
     if not cap.isOpened():
         print("[ERROR] Could not open video source.")
         sys.exit(1)
+
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # always process the latest frame, not buffered ones
 
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -130,7 +133,7 @@ def run(source):
             print("[ERROR] Lost stream.")
             break
 
-        results = model(frame, verbose=False)[0]
+        results = model(frame, verbose=False, imgsz=640)[0]
         draw_overlay(frame, floor_y, pixels_per_cm)
 
         alert_count = 0
@@ -149,18 +152,16 @@ def run(source):
             if box_w == 0:
                 continue
 
-            body_cm = box_h / pixels_per_cm
             aspect = box_h / box_w
 
-            # Filter: skip low-confidence, too-short, or wrong-shape detections
             if conf < MIN_CONFIDENCE:
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (80, 80, 80), 1)
                 cv2.putText(frame, f"skip:conf {conf:.2f}", (x1, y1 - 4),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.38, (80, 80, 80), 1)
                 continue
-            if body_cm < MIN_BODY_HEIGHT_CM:
+            if box_h < MIN_BOX_HEIGHT_PX:
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (80, 80, 80), 1)
-                cv2.putText(frame, f"skip:partial {body_cm:.0f}cm", (x1, y1 - 4),
+                cv2.putText(frame, f"skip:tiny {box_h}px", (x1, y1 - 4),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.38, (80, 80, 80), 1)
                 continue
             if aspect < MIN_ASPECT_RATIO:
