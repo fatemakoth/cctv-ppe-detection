@@ -3,19 +3,19 @@ import json
 import argparse
 import sys
 import os
-import mediapipe as mp
 from ultralytics import YOLO
 
-CALIBRATION_FILE = "calibration.json"
-PERSON_CLASS_ID  = 0
-ALERT_HEIGHT_CM  = 185   # head above this = RED
-MIN_CONFIDENCE   = 0.50
+CALIBRATION_FILE  = "calibration.json"
+PERSON_CLASS_ID   = 0
+ALERT_HEIGHT_CM   = 185    # head above this = RED
+MIN_CONFIDENCE    = 0.50
 MIN_BOX_HEIGHT_PX = 80
 MIN_ASPECT_RATIO  = 0.6
-FOOT_TOLERANCE    = 0.15  # ankle must be within 15% of person height from floor line
+FOOT_CONF_MIN     = 0.40   # min keypoint confidence to trust ankle position
+FOOT_TOLERANCE    = 0.18   # ankles must be within this fraction of box height from floor
 
-mp_pose  = mp.solutions.pose
-FOOT_IDS = [27, 28, 29, 30]  # left ankle, right ankle, left heel, right heel
+LEFT_ANKLE  = 15
+RIGHT_ANKLE = 16
 
 
 def load_calibration():
@@ -51,81 +51,67 @@ def draw_overlay(frame, floor_y, pixels_per_cm):
                     (10, alert_y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
 
 
-def run_pose(crop, pose_model):
-    """Run MediaPipe Pose on a crop, return the result object (or None)."""
-    h, w = crop.shape[:2]
-    if h == 0 or w == 0:
-        return None
-    rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-    return pose_model.process(rgb)
-
-
-def check_feet(pose_result, crop_h, floor_y_global, y1):
+def check_feet(kps, y1, y2, floor_y):
     """
-    Given a MediaPipe pose result, decide if feet are on the floor.
-    Returns: True (on floor), False (feet off floor), None (inconclusive)
+    Use YOLOv8-pose ankle keypoints (global frame coords) to check if feet are on the floor.
+    Returns: True (on floor), False (feet off floor), None (ankles not visible / inconclusive)
     """
-    if pose_result is None or not pose_result.pose_landmarks:
+    if kps is None or kps.data is None or len(kps.data) == 0:
         return None
 
-    landmarks = pose_result.pose_landmarks.landmark
-    foot_ys   = []
-    for idx in FOOT_IDS:
-        lm = landmarks[idx]
-        if lm.visibility >= 0.4:
-            foot_ys.append(int(lm.y * crop_h))
+    kp_data  = kps.data[0]   # shape [17, 3] — x, y, confidence
+    foot_ys  = []
+
+    for idx in [LEFT_ANKLE, RIGHT_ANKLE]:
+        kp   = kp_data[idx]
+        conf = float(kp[2])
+        if conf >= FOOT_CONF_MIN:
+            foot_ys.append(float(kp[1]))
 
     if not foot_ys:
-        return None
+        return None   # ankles not visible — inconclusive
 
     avg_foot_y = sum(foot_ys) / len(foot_ys)
+    box_h      = y2 - y1
 
-    # Clamp floor to crop bounds — far-away people have floor_y below their bounding box
-    floor_in_crop = min(crop_h - 1, max(0, floor_y_global - y1))
-    tolerance_px  = crop_h * FOOT_TOLERANCE
+    # Clamp floor reference to bounding box bottom — handles far-away people where
+    # the calibrated floor_y sits below their bounding box due to perspective
+    effective_floor_y = min(floor_y, y2)
+    tolerance_px      = box_h * FOOT_TOLERANCE
 
-    return avg_foot_y >= (floor_in_crop - tolerance_px)
+    return avg_foot_y >= (effective_floor_y - tolerance_px)
 
 
-def draw_ankle_dots(frame, crop_result, x1, y1, x2, y2):
-    """Draw ankle keypoints back onto the main frame."""
-    if crop_result is None:
+def draw_ankle_dots(frame, kps, color):
+    if kps is None or kps.data is None or len(kps.data) == 0:
         return
-    h = y2 - y1
-    w = x2 - x1
-    if h == 0 or w == 0:
-        return
-    landmarks = crop_result.pose_landmarks
-    if not landmarks:
-        return
-    for idx in FOOT_IDS:
-        lm = landmarks.landmark[idx]
-        if lm.visibility >= 0.4:
-            px = x1 + int(lm.x * w)
-            py = y1 + int(lm.y * h)
-            cv2.circle(frame, (px, py), 5, (0, 255, 255), -1)
+    kp_data = kps.data[0]
+    for idx in [LEFT_ANKLE, RIGHT_ANKLE]:
+        kp   = kp_data[idx]
+        conf = float(kp[2])
+        if conf >= FOOT_CONF_MIN:
+            px, py = int(float(kp[0])), int(float(kp[1]))
+            cv2.circle(frame, (px, py), 7, (0, 255, 255), -1)
+            cv2.putText(frame, f"{conf:.0%}", (px + 6, py),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 255), 1)
 
 
 def classify(x1, y1, x2, y2, floor_y, pixels_per_cm, feet_on_floor):
     head_height_cm = (floor_y - y1) / pixels_per_cm
-    body_height_cm = (y2 - y1) / pixels_per_cm
+    body_height_cm = (y2 - y1)     / pixels_per_cm
 
-    head_elevated = head_height_cm > ALERT_HEIGHT_CM
-
-    # RED:    head above threshold (standing elevated — most dangerous)
-    # ORANGE: head below threshold but MediaPipe says feet are off ground (bending/sitting elevated)
-    # GREEN:  feet on floor or inconclusive (default safe state)
-    if head_elevated:
-        state = "elevated"
+    if head_height_cm > ALERT_HEIGHT_CM:
+        state = "elevated"               # RED — head above threshold
     elif feet_on_floor is False:
-        state = "bending"
+        state = "bending"                # ORANGE — ankles confirmed off floor
     else:
-        state = "ok"
+        state = "ok"                     # GREEN — on floor or inconclusive (safe default)
 
     return {
         "head_height_cm": head_height_cm,
         "body_height_cm": body_height_cm,
-        "state": state,
+        "state":          state,
+        "feet_status":    feet_on_floor,
     }
 
 
@@ -140,8 +126,9 @@ def draw_person(frame, x1, y1, x2, y2, info, pid):
         status       = "FEET OFF FLOOR (BENDING)"
         bottom_label = "!! ELEVATED (BENDING) !!"
     else:
+        feet_lbl = {True: "ON FLOOR", False: "OFF FLOOR", None: "FEET ?"}
         color        = (0, 255, 0)
-        status       = "ON FLOOR"
+        status       = feet_lbl.get(info["feet_status"], "ON FLOOR")
         bottom_label = None
 
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
@@ -159,20 +146,13 @@ def draw_person(frame, x1, y1, x2, y2, info, pid):
 
 
 def run(source):
-    cal          = load_calibration()
-    floor_y      = cal["floor_y"]
+    cal           = load_calibration()
+    floor_y       = cal["floor_y"]
     pixels_per_cm = cal["pixels_per_cm"]
 
-    model = YOLO("yolov8n.pt")
-    print("[INFO] YOLOv8n loaded.")
-
-    pose = mp_pose.Pose(
-        static_image_mode=False,
-        model_complexity=0,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
-    )
-    print("[INFO] MediaPipe Pose loaded. Press 'q' to quit.")
+    # yolov8n-pose detects people AND their keypoints (incl. ankles) in one pass
+    model = YOLO("yolov8n-pose.pt")
+    print("[INFO] YOLOv8n-pose loaded. Press 'q' to quit.")
 
     cap = open_capture(source)
     if not cap.isOpened():
@@ -198,44 +178,43 @@ def run(source):
         bending_count = 0
         person_id     = 0
 
-        for box in results.boxes:
+        for i, box in enumerate(results.boxes):
             if int(box.cls) != PERSON_CLASS_ID:
                 continue
 
-            x1, y1_b, x2, y2_b = map(int, box.xyxy[0])
-            x1   = max(0, x1);   y1_b = max(0, y1_b)
-            x2   = min(w, x2);   y2_b = min(h, y2_b)
+            x1, y1b, x2, y2b = map(int, box.xyxy[0])
+            x1  = max(0, x1);   y1b = max(0, y1b)
+            x2  = min(w, x2);   y2b = min(h, y2b)
             conf = float(box.conf[0])
-            bh   = y2_b - y1_b
+            bh   = y2b - y1b
             bw   = x2 - x1
 
             if bw == 0 or bh == 0:
                 continue
             if conf < MIN_CONFIDENCE:
-                cv2.rectangle(frame, (x1, y1_b), (x2, y2_b), (80, 80, 80), 1)
-                cv2.putText(frame, f"skip:conf {conf:.2f}", (x1, y1_b - 4),
+                cv2.rectangle(frame, (x1, y1b), (x2, y2b), (80, 80, 80), 1)
+                cv2.putText(frame, f"skip:conf {conf:.2f}", (x1, y1b - 4),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.38, (80, 80, 80), 1)
                 continue
             if bh < MIN_BOX_HEIGHT_PX:
-                cv2.rectangle(frame, (x1, y1_b), (x2, y2_b), (80, 80, 80), 1)
-                cv2.putText(frame, f"skip:tiny {bh}px", (x1, y1_b - 4),
+                cv2.rectangle(frame, (x1, y1b), (x2, y2b), (80, 80, 80), 1)
+                cv2.putText(frame, f"skip:tiny {bh}px", (x1, y1b - 4),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.38, (80, 80, 80), 1)
                 continue
             if bh / bw < MIN_ASPECT_RATIO:
-                cv2.rectangle(frame, (x1, y1_b), (x2, y2_b), (80, 80, 80), 1)
-                cv2.putText(frame, f"skip:shape {bh/bw:.1f}", (x1, y1_b - 4),
+                cv2.rectangle(frame, (x1, y1b), (x2, y2b), (80, 80, 80), 1)
+                cv2.putText(frame, f"skip:shape {bh/bw:.1f}", (x1, y1b - 4),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.38, (80, 80, 80), 1)
                 continue
 
-            # Run MediaPipe once per person, reuse result for both foot check and dots
-            crop        = frame[y1_b:y2_b, x1:x2]
-            pose_result = run_pose(crop, pose)
-            feet_status = check_feet(pose_result, y2_b - y1_b, floor_y, y1_b)
-            draw_ankle_dots(frame, pose_result, x1, y1_b, x2, y2_b)
+            # Ankle keypoints from pose model (global frame coordinates)
+            kps         = results.keypoints[i] if results.keypoints is not None else None
+            feet_status = check_feet(kps, y1b, y2b, floor_y)
 
             person_id += 1
-            info = classify(x1, y1_b, x2, y2_b, floor_y, pixels_per_cm, feet_status)
-            draw_person(frame, x1, y1_b, x2, y2_b, info, person_id)
+            info = classify(x1, y1b, x2, y2b, floor_y, pixels_per_cm, feet_status)
+            draw_person(frame, x1, y1b, x2, y2b, info, person_id)
+            draw_ankle_dots(frame, kps, (0, 255, 255))
 
             if info["state"] == "elevated":
                 alert_count += 1
@@ -257,7 +236,6 @@ def run(source):
             break
 
     cap.release()
-    pose.close()
     cv2.destroyAllWindows()
 
 
