@@ -1,0 +1,19 @@
+# Model weights (auto-downloaded on first run)
+*.pt
+*.onnx
+
+# Calibration (device-specific, each user runs their own)
+calibration.json
+
+# Runtime data
+incidents.db
+snapshots/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# macOS
+.DS_Store
