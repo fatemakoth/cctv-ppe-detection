@@ -2,9 +2,17 @@ import cv2
 import argparse
 import sys
 
+def open_capture(source):
+    if isinstance(source, str) and source.startswith("rtsp"):
+        cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+    else:
+        cap = cv2.VideoCapture(source)
+    return cap
+
+
 def test_feed(source):
     print(f"[INFO] Connecting to: {source}")
-    cap = cv2.VideoCapture(source)
+    cap = open_capture(source)
 
     if not cap.isOpened():
         print("[ERROR] Could not open video source. Check your RTSP URL or camera index.")

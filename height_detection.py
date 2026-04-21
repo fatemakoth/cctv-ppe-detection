@@ -90,7 +90,11 @@ def run(source):
     model = YOLO("yolov8n.pt")
     print("[INFO] YOLOv8n loaded.")
 
-    cap = cv2.VideoCapture(source)
+    if isinstance(source, str) and source.startswith("rtsp"):
+        cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+    else:
+        cap = cv2.VideoCapture(source)
+
     if not cap.isOpened():
         print("[ERROR] Could not open video source.")
         sys.exit(1)

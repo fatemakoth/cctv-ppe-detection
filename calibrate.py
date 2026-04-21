@@ -12,8 +12,14 @@ def on_click(event, x, y, flags, param):
         clicks.append((x, y))
         print(f"  Point {len(clicks)} recorded: ({x}, {y})")
 
+def open_capture(source):
+    if isinstance(source, str) and source.startswith("rtsp"):
+        return cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+    return cv2.VideoCapture(source)
+
+
 def capture_frame(source):
-    cap = cv2.VideoCapture(source)
+    cap = open_capture(source)
     if not cap.isOpened():
         print("[ERROR] Could not open video source.")
         return None
