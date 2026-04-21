@@ -46,24 +46,12 @@ def is_valid_person(x1, y1, x2, y2, conf, pixels_per_cm):
 def draw_height_overlay(frame, floor_y, pixels_per_cm):
     h, w = frame.shape[:2]
 
-    # Floor line
-    cv2.line(frame, (0, floor_y), (w, floor_y), (0, 200, 255), 1)
-    cv2.putText(frame, "FLOOR", (10, floor_y - 6),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
-
-    # 185cm alert threshold line
+    # Only show the operational alert line — remove debug reference lines
     alert_y = int(floor_y - ALERT_HEIGHT_CM * pixels_per_cm)
     if 0 <= alert_y < h:
         cv2.line(frame, (0, alert_y), (w, alert_y), (0, 0, 255), 2)
-        cv2.putText(frame, f"{ALERT_HEIGHT_CM}cm ALERT LINE", (10, alert_y - 6),
+        cv2.putText(frame, f"{ALERT_HEIGHT_CM}cm ELEVATION THRESHOLD", (10, alert_y - 6),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
-
-    # Reference height line (calibrated height)
-    ref_y = int(floor_y - 165.1 * pixels_per_cm)
-    if 0 <= ref_y < h:
-        cv2.line(frame, (0, ref_y), (w, ref_y), (200, 200, 0), 1)
-        cv2.putText(frame, "165cm ref", (10, ref_y - 6),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 0), 1)
 
 
 def classify_person(x1, y1, x2, y2, floor_y, pixels_per_cm):
@@ -72,10 +60,13 @@ def classify_person(x1, y1, x2, y2, floor_y, pixels_per_cm):
     feet_above_floor_px = floor_y - y2  # positive = feet above floor line
 
     feet_on_floor = feet_above_floor_px <= FLOOR_TOLERANCE_PX
-
-    # Both conditions must be true: head above 185cm threshold AND feet off the ground
     head_above_threshold = head_height_cm > ALERT_HEIGHT_CM
-    elevated = head_above_threshold and not feet_on_floor
+
+    # RED:    feet off ground + head above 185cm line → standing elevated
+    # ORANGE: feet off ground + head below 185cm line → elevated but bending/crouching
+    # GREEN:  feet on ground → normal
+    elevated = not feet_on_floor and head_above_threshold
+    elevated_bending = not feet_on_floor and not head_above_threshold
 
     return {
         "head_height_cm": head_height_cm,
@@ -83,33 +74,43 @@ def classify_person(x1, y1, x2, y2, floor_y, pixels_per_cm):
         "feet_on_floor": feet_on_floor,
         "head_above_threshold": head_above_threshold,
         "elevated": elevated,
+        "elevated_bending": elevated_bending,
     }
 
 
 def draw_person(frame, x1, y1, x2, y2, info, person_id):
     elevated = info["elevated"]
 
-    if elevated:
-        color = (0, 0, 255)      # red — confirmed elevation
-    elif info["head_above_threshold"] and info["feet_on_floor"]:
-        color = (0, 165, 255)    # orange — head high but feet on floor (tall person, no alert)
+    if info["elevated"]:
+        color = (0, 0, 255)        # red — feet off ground, head above threshold
+    elif info["elevated_bending"]:
+        color = (0, 165, 255)      # orange — feet off ground, bending below threshold
     else:
-        color = (0, 255, 0)      # green — normal
+        color = (0, 255, 0)        # green — normal
 
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
-    feet_status = "ON FLOOR" if info["feet_on_floor"] else "FEET OFF FLOOR"
+    if info["feet_on_floor"]:
+        feet_status = "ON FLOOR"
+    elif info["elevated"]:
+        feet_status = "FEET OFF FLOOR"
+    else:
+        feet_status = "FEET OFF FLOOR (BENDING)"
+
     label_lines = [
-        f"P{person_id} | head:{info['head_height_cm']:.0f}cm | body:{info['body_height_cm']:.0f}cm",
-        feet_status,
+        f"P{person_id} | {feet_status}",
+        f"head:{info['head_height_cm']:.0f}cm | body:{info['body_height_cm']:.0f}cm",
     ]
     for i, line in enumerate(label_lines):
         cv2.putText(frame, line, (x1, y1 - 8 - i * 18),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-    if elevated:
+    if info["elevated"]:
         cv2.putText(frame, "!! ELEVATED !!",
                     (x1, y2 + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+    elif info["elevated_bending"]:
+        cv2.putText(frame, "!! ELEVATED (BENDING) !!",
+                    (x1, y2 + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
 
 
 def run(source):
@@ -117,8 +118,8 @@ def run(source):
     floor_y = cal["floor_y"]
     pixels_per_cm = cal["pixels_per_cm"]
 
-    model = YOLO("yolov8n.pt")
-    print("[INFO] YOLOv8n loaded.")
+    model = YOLO("yolov8s.pt")  # small model — better pose/crouch detection than nano
+    print("[INFO] YOLOv8s loaded.")
     print(f"[INFO] Filters — min confidence: {MIN_CONFIDENCE}, min body height: {MIN_BODY_HEIGHT_CM}cm, min aspect ratio: {MIN_ASPECT_RATIO}")
 
     if isinstance(source, str) and source.startswith("rtsp"):
@@ -144,6 +145,7 @@ def run(source):
         draw_height_overlay(frame, floor_y, pixels_per_cm)
 
         alert_count = 0
+        bending_count = 0
         person_id = 0
         for box in results.boxes:
             if int(box.cls) != PERSON_CLASS_ID:
@@ -166,6 +168,8 @@ def run(source):
 
             if info["elevated"]:
                 alert_count += 1
+            elif info["elevated_bending"]:
+                bending_count += 1
 
         cv2.putText(frame, f"People: {person_id}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
@@ -174,6 +178,10 @@ def run(source):
             cv2.putText(frame, f"ELEVATION ALERT x{alert_count}",
                         (w // 2 - 180, 60), cv2.FONT_HERSHEY_SIMPLEX,
                         1.2, (0, 0, 255), 3)
+        if bending_count > 0:
+            cv2.putText(frame, f"ELEVATED (BENDING) x{bending_count}",
+                        (w // 2 - 200, 100), cv2.FONT_HERSHEY_SIMPLEX,
+                        1.0, (0, 165, 255), 2)
 
         cv2.imshow("Height Detection", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
