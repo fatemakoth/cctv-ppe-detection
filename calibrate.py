@@ -45,9 +45,9 @@ def capture_frame(source):
         if not ret:
             break
         elapsed = time.time() - countdown_start
-        remaining = int(5 - elapsed) + 1
-        if remaining <= 0:
+        if elapsed >= 5:
             break
+        remaining = 5 - int(elapsed)
         preview = frame.copy()
         cv2.putText(preview, f"Stand still... {remaining}",
                     (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 80, 255), 3)
