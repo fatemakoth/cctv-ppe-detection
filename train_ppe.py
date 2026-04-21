@@ -18,7 +18,7 @@ results = model.train(
     verbose=False,
 )
 
-best_weights = "runs/detect/ppe_model/ppe_train/weights/best.pt"
+best_weights = "ppe_model/ppe_train/weights/best.pt"
 dest = "ppe_model/ppe_best.pt"
 
 if os.path.exists(best_weights):
