@@ -97,7 +97,7 @@ def draw_person(frame, x1, y1, x2, y2, info, pid):
 
     for i, line in enumerate([
         f"P{pid} | {status}",
-        f"head:{info['head_height_cm']:.0f}cm | body:{info['body_height_cm']:.0f}cm",
+        f"head:{info['head_height_cm']:.0f}cm | body:{info['body_height_cm']:.0f}cm | feet:{info['foot_height_cm']:.0f}cm",
     ]):
         cv2.putText(frame, line, (x1, y1 - 8 - i * 18),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
