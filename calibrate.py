@@ -2,6 +2,7 @@ import cv2
 import json
 import argparse
 import time
+import os
 
 CALIBRATION_FILE = "calibration.json"
 
@@ -13,8 +14,18 @@ def on_click(event, x, y, flags, param):
         print(f"  Point {len(clicks)} recorded: ({x}, {y})")
 
 def open_capture(source):
-    if isinstance(source, str) and source.startswith("rtsp"):
-        return cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+    if not (isinstance(source, str) and source.startswith("rtsp")):
+        return cv2.VideoCapture(source)
+
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+
+    for backend in [cv2.CAP_FFMPEG, cv2.CAP_ANY, None]:
+        cap = cv2.VideoCapture(source, backend) if backend is not None else cv2.VideoCapture(source)
+        if cap.isOpened():
+            print(f"[INFO] RTSP opened with backend={backend}")
+            return cap
+        cap.release()
+
     return cv2.VideoCapture(source)
 
 

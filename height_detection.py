@@ -2,6 +2,7 @@ import cv2
 import json
 import argparse
 import sys
+import os
 from ultralytics import YOLO
 
 CALIBRATION_FILE = "calibration.json"
@@ -25,8 +26,21 @@ def load_calibration():
 
 
 def open_capture(source):
-    if isinstance(source, str) and source.startswith("rtsp"):
-        return cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+    if not (isinstance(source, str) and source.startswith("rtsp")):
+        return cv2.VideoCapture(source)
+
+    # Force TCP transport — more reliable than UDP on most networks
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+
+    # Try backends in order: FFMPEG → ANY → default (no flag)
+    for backend in [cv2.CAP_FFMPEG, cv2.CAP_ANY, None]:
+        cap = cv2.VideoCapture(source, backend) if backend is not None else cv2.VideoCapture(source)
+        if cap.isOpened():
+            print(f"[INFO] RTSP opened with backend={backend}")
+            return cap
+        cap.release()
+
+    print("[ERROR] All backends failed for RTSP source.")
     return cv2.VideoCapture(source)
 
 
