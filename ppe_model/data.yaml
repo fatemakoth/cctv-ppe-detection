@@ -1,0 +1,24 @@
+path: /Users/fatema/cctv-ppe-detection/ppe_model
+train: train/images
+val: valid/images
+test: test/images
+
+names:
+- Barricade
+- Dumpster
+- EXCAVATORS
+- Gloves
+- Hardhat
+- Mask
+- NO-Hardhat
+- NO-Mask
+- NO-Safety Vest
+- Person
+- Safety Net
+- Safety Shoes
+- Safety Vest
+- dump truck
+- mini-van
+- truck
+- wheel loader
+nc: 17

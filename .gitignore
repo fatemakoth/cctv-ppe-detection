@@ -9,6 +9,16 @@ calibration.json
 incidents.db
 snapshots/
 
+# Training runs (large, auto-generated)
+runs/
+
+# PPE model weights and dataset images (large files)
+ppe_model/ppe_best.pt
+ppe_model/train/
+ppe_model/valid/
+ppe_model/test/
+ppe_model/ppe_train/
+
 # Python
 __pycache__/
 *.pyc
