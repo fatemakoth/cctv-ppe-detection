@@ -20,8 +20,15 @@ def load_calibration():
         return json.load(f)
 
 def open_capture(source):
-    if isinstance(source, str) and source.startswith("rtsp"):
-        return cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+    if not (isinstance(source, str) and source.startswith("rtsp")):
+        return cv2.VideoCapture(source)
+    import os
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+    for backend in [cv2.CAP_FFMPEG, cv2.CAP_ANY, None]:
+        cap = cv2.VideoCapture(source, backend) if backend is not None else cv2.VideoCapture(source)
+        if cap.isOpened():
+            return cap
+        cap.release()
     return cv2.VideoCapture(source)
 
 def check_feet(crop, pose, floor_y_in_crop, tolerance_px):
@@ -53,6 +60,11 @@ def check_feet(crop, pose, floor_y_in_crop, tolerance_px):
         return None, [], annotated   # keypoints not visible
 
     avg_foot_y = sum(foot_ys) / len(foot_ys)
+
+    # Clamp floor_y_in_crop to within crop — for far-away people floor_y_global may be
+    # below the crop bottom, which would wrongly flag everyone far back as "off floor"
+    floor_y_in_crop = min(floor_y_in_crop, h - 1)
+
     feet_on_floor = avg_foot_y >= (floor_y_in_crop - tolerance_px)
 
     cv2.line(annotated, (0, int(floor_y_in_crop)),
@@ -137,7 +149,7 @@ def run(source):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", default="1", help="Camera index or RTSP URL")
+    parser.add_argument("--source", default="0", help="Camera index or RTSP URL")
     args = parser.parse_args()
     source = int(args.source) if args.source.isdigit() else args.source
     run(source)
