@@ -12,7 +12,8 @@ PERSON_MODEL    = "yolov8s.pt"       # strong pretrained COCO model for person d
 PPE_MODEL_PATH  = "ppe_model/ppe_best.pt"
 
 PERSON_CONF     = 0.50
-PPE_CONF        = 0.25               # low — our model is undertrained, cast wide net
+POSITIVE_CONF   = 0.65      # must be confident to say Hardhat/Vest is present (OK)
+NEGATIVE_CONF   = 0.30      # lower bar to flag NO-Hardhat/NO-Vest (MISSING)
 MIN_BOX_HEIGHT  = 80
 MIN_ASPECT      = 0.6
 SMOOTH_FRAMES   = 10
@@ -143,28 +144,29 @@ def detect_frame(frame, person_model, ppe_model, ppe_names, frame_w, frame_h):
     if not persons:
         return []
 
-    # Step 2: run PPE model on full frame to get all PPE item locations
-    ppe_results = ppe_model(frame, verbose=False, conf=PPE_CONF)[0]
+    # Step 2: run PPE model on full frame — use lowest threshold, filter per class below
+    ppe_results = ppe_model(frame, verbose=False, conf=NEGATIVE_CONF)[0]
     ppe_hits = []
     for box in ppe_results.boxes:
         cls  = ppe_names[int(box.cls)]
+        conf = float(box.conf)
         if cls not in PPE_CLASSES:
             continue
         b = tuple(map(int, box.xyxy[0]))
-        ppe_hits.append((b, cls))
+        ppe_hits.append((b, cls, conf))
 
     # Step 3: associate PPE items to persons by overlap
     detections = []
     for pbox in persons:
         helmets = []
         vests   = []
-        for ppe_box, cls in ppe_hits:
+        for ppe_box, cls, conf in ppe_hits:
             if overlap_frac(ppe_box, pbox) < 0.35:
                 continue
             if cls in (HAS_HELMET, NO_HELMET):
-                helmets.append(cls)
+                helmets.append((cls, conf))
             elif cls in (HAS_VEST, NO_VEST):
-                vests.append(cls)
+                vests.append((cls, conf))
 
         helmet = _resolve(helmets, HAS_HELMET, NO_HELMET)
         vest   = _resolve(vests,   HAS_VEST,   NO_VEST)
@@ -172,10 +174,12 @@ def detect_frame(frame, person_model, ppe_model, ppe_names, frame_w, frame_h):
 
     return detections
 
-def _resolve(labels, pos, neg):
-    if not labels:      return "?"
-    has = any(l == pos for l in labels)
-    no  = any(l == neg for l in labels)
+def _resolve(label_confs, pos, neg):
+    """Apply split thresholds: positive labels need POSITIVE_CONF, negatives need NEGATIVE_CONF."""
+    if not label_confs:
+        return "?"
+    has = any(l == pos and c >= POSITIVE_CONF for l, c in label_confs)
+    no  = any(l == neg and c >= NEGATIVE_CONF for l, c in label_confs)
     if has and not no:  return "OK"
     if no:              return "MISSING"
     return "?"
@@ -186,10 +190,15 @@ def _resolve(labels, pos, neg):
 def _col(s):
     return (0, 200, 0) if s == "OK" else (0, 0, 255) if s == "MISSING" else (0, 165, 255)
 
+def _is_violation(status):
+    return status in ("MISSING", "?")   # unverified = flagged (safety-first)
+
 def draw_person(frame, box, helmet, vest, pid):
     x1, y1, x2, y2 = box
+    h_viol = _is_violation(helmet)
+    v_viol = _is_violation(vest)
     bc = (0, 0, 255) if (helmet == "MISSING" or vest == "MISSING") else \
-         (0, 200, 0) if (helmet == "OK" and vest == "OK") else (0, 165, 255)
+         (0, 165, 255) if (h_viol or v_viol) else (0, 200, 0)
     cv2.rectangle(frame, (x1, y1), (x2, y2), bc, 2)
     for i, (txt, col) in enumerate([
         (f"P{pid}",           bc),
@@ -198,7 +207,7 @@ def draw_person(frame, box, helmet, vest, pid):
     ]):
         cv2.putText(frame, txt, (x1, y1 - 10 - i * 18),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, col, 2)
-    if helmet == "MISSING" or vest == "MISSING":
+    if h_viol or v_viol:
         cv2.putText(frame, "!! PPE VIOLATION !!",
                     (x1, y2 + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
@@ -232,7 +241,7 @@ def run(source):
         violations = 0
         for pid, (box, helmet, vest) in enumerate(smoothed, 1):
             draw_person(frame, box, helmet, vest, pid)
-            if helmet == "MISSING" or vest == "MISSING":
+            if _is_violation(helmet) or _is_violation(vest):
                 violations += 1
 
         if violations:
