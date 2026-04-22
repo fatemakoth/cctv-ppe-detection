@@ -1,4 +1,4 @@
-path: /Users/fatema/cctv-ppe-detection/ppe_model
+path: .
 train: train/images
 val: valid/images
 test: test/images
