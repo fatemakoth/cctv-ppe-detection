@@ -32,10 +32,17 @@ def download_model(api_key):
                 version = project.version(v)
                 print(f"[INFO] Found version {v}. Downloading...")
                 version.download("yolov8", location="ppe_model")
-                print(f"\n[DONE] Model saved to: ppe_model/")
-                downloaded = True
-                break
-            except Exception:
+                # Verify images actually landed
+                import glob
+                imgs = glob.glob("ppe_model/**/images/**", recursive=True)
+                if imgs:
+                    print(f"\n[DONE] Model saved to: ppe_model/")
+                    downloaded = True
+                    break
+                else:
+                    print(f"  [WARN] Download reported success but no images found. Trying next...")
+            except Exception as e:
+                print(f"  [WARN] version {v} failed: {e}")
                 continue
 
         if downloaded:
