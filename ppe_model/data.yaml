@@ -1,4 +1,4 @@
-path: .
+path: ppe_model
 train: train/images
 val: valid/images
 test: test/images
