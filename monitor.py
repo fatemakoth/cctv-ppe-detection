@@ -1,12 +1,14 @@
 """
-Unified safety monitor — PPE detection + height/elevation detection.
+Unified safety monitor — PPE detection + feet-off-floor detection.
 
 Models:
-  yolov8n-pose.pt       person detection + ankle keypoints (height)
+  yolov8n-pose.pt       person detection + ankle keypoints
   ppe_model/ppe_best.pt PPE detection on head/torso crops
 
-Requires calibration.json for height detection (run calibrate.py first).
-If calibration.json is missing, height detection is skipped automatically.
+Floor detection works in two modes:
+  - Without calibration: relative ankle check only (perspective-invariant)
+  - With calibration (floor_points):  relative check + floor-map check
+    (catches standing on chairs/platforms too)
 """
 
 import cv2
@@ -15,12 +17,13 @@ import argparse
 import os
 import threading
 import time
+import numpy as np
 from collections import deque
 from ultralytics import YOLO
 
 # ── config ─────────────────────────────────────────────────────────────────────
 
-POSE_MODEL     = "yolov8n-pose.pt"      # person + keypoints in one pass
+POSE_MODEL     = "yolov8n-pose.pt"
 PPE_MODEL_PATH = "ppe_model/ppe_best.pt"
 
 PERSON_CONF    = 0.50
@@ -37,38 +40,66 @@ MISSING_THRESH = 4
 OK_THRESH      = 6
 IOU_MATCH      = 0.25
 
-# Height thresholds
-ALERT_HEIGHT_CM   = 185    # head above this (absolute, requires calibration) = ELEVATED
-ANKLE_BOX_THRESH  = 0.13   # ankles more than 13% of box height above box bottom = off floor
-FOOT_CONF_MIN     = 0.40   # min keypoint confidence to trust ankle
-MIN_ANKLES        = 1      # need at least this many visible ankles to make a call
+# Feet-off-floor thresholds
+ANKLE_BOX_THRESH  = 0.13  # ankle > 13% of box height above box bottom → feet off floor
+FLOOR_MAP_THRESH  = 0.10  # ankle > 10% of box height above mapped floor → feet off floor
+FOOT_CONF_MIN     = 0.40
+MIN_ANKLES        = 1
 
 LEFT_ANKLE  = 15
 RIGHT_ANKLE = 16
 
-# Body region fractions for PPE crop
-HEAD_TOP   = 0.0
-HEAD_BOT   = 0.30
-TORSO_TOP  = 0.15
-TORSO_BOT  = 0.70
+# PPE crop regions (fraction of person box height)
+HEAD_TOP  = 0.0;  HEAD_BOT  = 0.30
+TORSO_TOP = 0.15; TORSO_BOT = 0.70
 
-HAS_HELMET = "Hardhat"
-NO_HELMET  = "NO-Hardhat"
-HAS_VEST   = "Safety Vest"
-NO_VEST    = "NO-Safety Vest"
+HAS_HELMET = "Hardhat";   NO_HELMET = "NO-Hardhat"
+HAS_VEST   = "Safety Vest"; NO_VEST = "NO-Safety Vest"
 
 
-# ── calibration ────────────────────────────────────────────────────────────────
+# ── calibration / floor map ────────────────────────────────────────────────────
 
 def load_calibration():
     try:
         with open("calibration.json") as f:
             data = json.load(f)
-        print(f"[INFO] Calibration loaded: {data['pixels_per_cm']:.4f} px/cm  floor_y={data['floor_y']}")
+        pts = data.get("floor_points", [])
+        if pts:
+            print(f"[INFO] Floor map loaded: {len(pts)} points")
+        else:
+            print("[WARN] calibration.json has no floor_points — floor-map check disabled.")
         return data
     except FileNotFoundError:
-        print("[WARN] calibration.json not found — height detection disabled. Run calibrate.py to enable.")
+        print("[INFO] No calibration.json — using relative ankle check only.")
         return None
+
+def floor_y_at(x, floor_points):
+    """
+    Given a list of (px, py) floor calibration points, return the interpolated
+    floor y-pixel at horizontal position x.
+    Uses a linear fit across all points (robust for perspective floors).
+    """
+    if not floor_points or len(floor_points) < 2:
+        return None
+    xs = np.array([p[0] for p in floor_points], dtype=float)
+    ys = np.array([p[1] for p in floor_points], dtype=float)
+    # Linear regression: floor_y = a*x + b
+    coeffs = np.polyfit(xs, ys, 1)
+    return float(np.polyval(coeffs, x))
+
+def draw_floor_map(frame, floor_points):
+    """Draw the calibrated floor points and fitted floor line."""
+    if not floor_points or len(floor_points) < 2:
+        return
+    w = frame.shape[1]
+    xs = np.array([p[0] for p in floor_points], dtype=float)
+    ys = np.array([p[1] for p in floor_points], dtype=float)
+    coeffs = np.polyfit(xs, ys, 1)
+    y_left  = int(np.polyval(coeffs, 0))
+    y_right = int(np.polyval(coeffs, w - 1))
+    cv2.line(frame, (0, y_left), (w - 1, y_right), (0, 180, 0), 1)
+    for px, py in floor_points:
+        cv2.circle(frame, (int(px), int(py)), 5, (0, 255, 0), -1)
 
 
 # ── threaded RTSP reader ───────────────────────────────────────────────────────
@@ -123,9 +154,9 @@ def iou(a, b):
 
 def region_crop(frame, pbox, top_frac, bot_frac, frame_h):
     x1, y1, x2, y2 = pbox
-    ph   = y2 - y1
-    ry1  = max(0, y1 + int(ph * top_frac))
-    ry2  = min(frame_h, y1 + int(ph * bot_frac))
+    ph  = y2 - y1
+    ry1 = max(0, y1 + int(ph * top_frac))
+    ry2 = min(frame_h, y1 + int(ph * bot_frac))
     crop = frame[ry1:ry2, x1:x2]
     return crop if crop.size > 0 else None
 
@@ -138,7 +169,6 @@ class PersonTracker:
         self._next  = 0
 
     def update(self, detections):
-        """detections: list of (box, helmet_raw, vest_raw)"""
         matched = set()
         results = []
         for box, h, v in detections:
@@ -165,9 +195,9 @@ class PersonTracker:
 def _vote(hist):
     c = {}
     for s in hist: c[s] = c.get(s, 0) + 1
-    if c.get("OK", 0) >= OK_THRESH:         return "OK"
-    if c.get("MISSING", 0) >= MISSING_THRESH: return "MISSING"
-    return "MISSING"   # safety-first default
+    if c.get("OK", 0) >= OK_THRESH:            return "OK"
+    if c.get("MISSING", 0) >= MISSING_THRESH:  return "MISSING"
+    return "MISSING"
 
 
 # ── PPE detection ──────────────────────────────────────────────────────────────
@@ -176,10 +206,9 @@ def check_helmet(frame, pbox, ppe_model, ppe_names, frame_h):
     crop = region_crop(frame, pbox, HEAD_TOP, HEAD_BOT, frame_h)
     if crop is None:
         return "MISSING"
-    best_yes, best_no = 0.0, 0.0
+    best_yes = best_no = 0.0
     for box in ppe_model(crop, verbose=False, conf=HELMET_NO_CONF)[0].boxes:
-        cls  = ppe_names[int(box.cls)]
-        conf = float(box.conf)
+        cls = ppe_names[int(box.cls)]; conf = float(box.conf)
         if cls == HAS_HELMET: best_yes = max(best_yes, conf)
         if cls == NO_HELMET:  best_no  = max(best_no,  conf)
     if best_no  >= HELMET_NO_CONF: return "MISSING"
@@ -190,10 +219,9 @@ def check_vest(frame, pbox, ppe_model, ppe_names, frame_h):
     crop = region_crop(frame, pbox, TORSO_TOP, TORSO_BOT, frame_h)
     if crop is None:
         return "MISSING"
-    best_yes, best_no = 0.0, 0.0
+    best_yes = best_no = 0.0
     for box in ppe_model(crop, verbose=False, conf=VEST_NO_CONF)[0].boxes:
-        cls  = ppe_names[int(box.cls)]
-        conf = float(box.conf)
+        cls = ppe_names[int(box.cls)]; conf = float(box.conf)
         if cls == HAS_VEST: best_yes = max(best_yes, conf)
         if cls == NO_VEST:  best_no  = max(best_no,  conf)
     if best_no  >= VEST_NO_CONF:  return "MISSING"
@@ -201,55 +229,58 @@ def check_vest(frame, pbox, ppe_model, ppe_names, frame_h):
     return "MISSING"
 
 
-# ── height / elevation detection ───────────────────────────────────────────────
+# ── feet-off-floor detection ───────────────────────────────────────────────────
 
-def check_elevation(box, kps, cal):
+def check_feet(box, kps, floor_points):
     """
-    Returns: (state, head_cm, ankle_rel)
-      state: "elevated" | "bending" | "ok" | "unknown"
+    Returns: (off_floor: bool, ankle_rel: float|None)
 
-    Two independent checks:
-      1. ELEVATED — head absolute height > ALERT_HEIGHT_CM (needs calibration).
-      2. BENDING  — ankle position relative to bounding box bottom.
-                    Perspective-invariant: works at any camera distance.
-                    ankle_rel = (box_bottom - ankle_y) / box_height
-                    ≈ 0 when standing (ankles at box bottom)
-                    > ANKLE_BOX_THRESH when feet are off the floor.
+    Check 1 — Floor map (if calibrated):
+      Compare ankle pixel position to the interpolated floor surface at that x.
+      Normalized by box height → distance-invariant.
+      Catches: standing on chair, platform, machinery.
+
+    Check 2 — Relative to bounding box bottom (always runs):
+      ankle_rel = (box_bottom - ankle_y) / box_height
+      ≈ 0 when standing, > ANKLE_BOX_THRESH when feet are dangling/raised.
+      Catches: sitting with feet up, climbing, hanging.
     """
     x1, y1, x2, y2 = box
-    box_h = y2 - y1
+    box_h = max(y2 - y1, 1)
 
-    # ── check 1: absolute head height (calibration required) ──────────────────
-    head_cm = None
-    if cal is not None:
-        head_cm = (cal["floor_y"] - y1) / cal["pixels_per_cm"]
-        if head_cm > ALERT_HEIGHT_CM:
-            return "elevated", head_cm, None
-
-    # ── check 2: ankle relative to box bottom (perspective-invariant) ─────────
     if kps is None or kps.data is None or len(kps.data) == 0:
-        return "ok", head_cm, None   # no keypoints → can't judge feet
+        return False, None
 
-    kp_data   = kps.data[0]
-    ankle_ys  = []
+    kp_data  = kps.data[0]
+    ankle_xs, ankle_ys = [], []
     for idx in [LEFT_ANKLE, RIGHT_ANKLE]:
         kp = kp_data[idx]
         if float(kp[2]) >= FOOT_CONF_MIN:
+            ankle_xs.append(float(kp[0]))
             ankle_ys.append(float(kp[1]))
 
     if len(ankle_ys) < MIN_ANKLES:
-        return "ok", head_cm, None   # ankles not visible → give benefit of doubt
+        return False, None
 
-    avg_ankle_y = sum(ankle_ys) / len(ankle_ys)
+    avg_ax = sum(ankle_xs) / len(ankle_xs)
+    avg_ay = sum(ankle_ys) / len(ankle_ys)
 
-    # How far above the box bottom are the ankles, as fraction of box height?
-    # Standing normally → ≈ 0.  Feet off floor → > ANKLE_BOX_THRESH.
-    ankle_rel = (y2 - avg_ankle_y) / max(box_h, 1)
+    # ── Check 1: floor map ────────────────────────────────────────────────────
+    if floor_points and len(floor_points) >= 2:
+        expected_floor_y = floor_y_at(avg_ax, floor_points)
+        if expected_floor_y is not None:
+            # How far above the floor is the ankle, normalized by box height
+            above_floor = (expected_floor_y - avg_ay) / box_h
+            if above_floor > FLOOR_MAP_THRESH:
+                ankle_rel = (y2 - avg_ay) / box_h
+                return True, ankle_rel
 
+    # ── Check 2: relative to box bottom ──────────────────────────────────────
+    ankle_rel = (y2 - avg_ay) / box_h
     if ankle_rel > ANKLE_BOX_THRESH:
-        return "bending", head_cm, ankle_rel
+        return True, ankle_rel
 
-    return "ok", head_cm, ankle_rel
+    return False, ankle_rel
 
 
 # ── drawing ────────────────────────────────────────────────────────────────────
@@ -257,67 +288,40 @@ def check_elevation(box, kps, cal):
 def _ppe_col(s):
     return (0, 200, 0) if s == "OK" else (0, 0, 255)
 
-def draw_threshold_line(frame, cal, w):
-    if cal is None:
-        return
-    floor_y   = cal["floor_y"]
-    px_per_cm = cal["pixels_per_cm"]
-    alert_y   = int(floor_y - ALERT_HEIGHT_CM * px_per_cm)
-    h = frame.shape[0]
-    if 0 <= alert_y < h:
-        cv2.line(frame, (0, alert_y), (w, alert_y), (0, 0, 255), 1)
-        cv2.putText(frame, f"{ALERT_HEIGHT_CM}cm threshold",
-                    (10, alert_y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-
-def draw_ankle_dots(frame, kps, ankle_rel):
+def draw_ankle_dots(frame, kps, off_floor):
     if kps is None or kps.data is None or len(kps.data) == 0:
         return
     kp_data = kps.data[0]
+    color   = (0, 0, 255) if off_floor else (0, 255, 255)
     for idx in [LEFT_ANKLE, RIGHT_ANKLE]:
         kp = kp_data[idx]
         if float(kp[2]) >= FOOT_CONF_MIN:
             px, py = int(float(kp[0])), int(float(kp[1]))
-            color  = (0, 0, 255) if (ankle_rel is not None and ankle_rel > ANKLE_BOX_THRESH) else (0, 255, 255)
             cv2.circle(frame, (px, py), 7, color, -1)
-            if ankle_rel is not None:
-                cv2.putText(frame, f"{ankle_rel:.2f}",
-                            (px + 6, py), cv2.FONT_HERSHEY_SIMPLEX, 0.38, color, 1)
 
-def draw_person(frame, box, helmet, vest, elev_state, head_cm, ankle_rel, kps, pid, cal_enabled):
+def draw_person(frame, box, helmet, vest, off_floor, kps, pid):
     x1, y1, x2, y2 = box
-    ppe_ok    = helmet == "OK" and vest == "OK"
-    elev_ok   = elev_state == "ok"
+    ppe_ok = helmet == "OK" and vest == "OK"
 
-    # Box color: elevation takes priority over PPE for color
-    if elev_state == "elevated":
-        bc = (0, 0, 255)
-    elif elev_state == "bending":
-        bc = (0, 140, 255)
+    if off_floor:
+        bc = (0, 140, 255)       # orange — feet off floor
     elif not ppe_ok:
-        bc = (0, 0, 255)
+        bc = (0, 0, 255)         # red — PPE violation
     else:
-        bc = (0, 200, 0)
+        bc = (0, 200, 0)         # green — all good
 
     cv2.rectangle(frame, (x1, y1), (x2, y2), bc, 2)
 
-    # Labels — built bottom-up from y1
-    lines = [(f"P{pid}", bc)]
-    lines.append((f"Helmet: {helmet}", _ppe_col(helmet)))
-    lines.append((f"Vest  : {vest}",   _ppe_col(vest)))
-    if cal_enabled and head_cm is not None:
-        lines.append((f"Head: {head_cm:.0f}cm", bc))
-
-    for i, (txt, col) in enumerate(lines):
+    for i, (txt, col) in enumerate([
+        (f"P{pid}",           bc),
+        (f"Helmet: {helmet}", _ppe_col(helmet)),
+        (f"Vest  : {vest}",   _ppe_col(vest)),
+    ]):
         cv2.putText(frame, txt, (x1, y1 - 10 - i * 18),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.52, col, 2)
 
-    # Bottom violation labels
     bottom_y = y2 + 22
-    if elev_state == "elevated":
-        cv2.putText(frame, "!! ELEVATED !!",
-                    (x1, bottom_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-        bottom_y += 22
-    elif elev_state == "bending":
+    if off_floor:
         cv2.putText(frame, "!! FEET OFF FLOOR !!",
                     (x1, bottom_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 140, 255), 2)
         bottom_y += 22
@@ -325,24 +329,26 @@ def draw_person(frame, box, helmet, vest, elev_state, head_cm, ankle_rel, kps, p
         cv2.putText(frame, "!! PPE VIOLATION !!",
                     (x1, bottom_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-    draw_ankle_dots(frame, kps, ankle_rel)
+    draw_ankle_dots(frame, kps, off_floor)
 
 
 # ── main loop ──────────────────────────────────────────────────────────────────
 
 def run(source):
-    cal = load_calibration()
+    cal          = load_calibration()
+    floor_points = cal.get("floor_points", []) if cal else []
 
     print("[INFO] Loading models...")
     pose_model = YOLO(POSE_MODEL)
     ppe_model  = YOLO(PPE_MODEL_PATH)
     ppe_names  = ppe_model.names
+    print(f"[INFO] Floor map: {'YES (' + str(len(floor_points)) + ' points)' if floor_points else 'NO — run calibrate.py to enable'}")
     print("[INFO] Press 'q' to quit.\n")
 
     cap = FrameReader(source)
     w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    print(f"[INFO] Stream: {w}x{h}  |  height detection: {'ON' if cal else 'OFF (no calibration)'}")
+    print(f"[INFO] Stream: {w}x{h}")
 
     tracker = PersonTracker()
 
@@ -352,13 +358,14 @@ def run(source):
             time.sleep(0.01)
             continue
 
-        draw_threshold_line(frame, cal, w)
+        # Draw calibrated floor line (subtle, for reference)
+        if floor_points:
+            draw_floor_map(frame, floor_points)
 
-        # Single pose model pass → persons + keypoints
         pose_res = pose_model(frame, verbose=False, conf=PERSON_CONF)[0]
 
-        raw_ppe = []   # for PPE smoother: (box, helmet_raw, vest_raw)
-        per_person_elev = []   # (box, elev_state, head_cm, ankle_cm, kps)
+        raw_ppe      = []
+        elev_results = []
 
         for i, box in enumerate(pose_res.boxes):
             if int(box.cls) != 0:
@@ -373,51 +380,35 @@ def run(source):
             pbox = (x1, y1, x2, y2)
             kps  = pose_res.keypoints[i] if pose_res.keypoints is not None else None
 
-            # PPE (raw, will be smoothed)
             helmet = check_helmet(frame, pbox, ppe_model, ppe_names, h)
             vest   = check_vest(frame, pbox, ppe_model, ppe_names, h)
             raw_ppe.append((pbox, helmet, vest))
 
-            # Elevation (immediate, no smoothing needed — physical position)
-            elev_state, head_cm, ankle_rel = check_elevation(pbox, kps, cal)
-            per_person_elev.append((pbox, elev_state, head_cm, ankle_rel, kps))
+            off_floor, ankle_rel = check_feet(pbox, kps, floor_points)
+            elev_results.append((pbox, off_floor, kps))
 
-        # Smooth PPE across frames
-        smoothed_ppe = tracker.update(raw_ppe)
-
-        # Draw each person
-        ppe_violations  = 0
-        elev_alerts     = 0
-        bending_alerts  = 0
+        smoothed_ppe  = tracker.update(raw_ppe)
+        ppe_violations = 0
+        feet_alerts    = 0
 
         for idx, (box, helmet, vest) in enumerate(smoothed_ppe):
-            # Match elevation result by index (same order, same boxes)
-            if idx < len(per_person_elev):
-                _, elev_state, head_cm, ankle_rel, kps = per_person_elev[idx]
+            if idx < len(elev_results):
+                _, off_floor, kps = elev_results[idx]
             else:
-                elev_state, head_cm, ankle_rel, kps = "ok", None, None, None
+                off_floor, kps = False, None
 
-            draw_person(frame, box, helmet, vest,
-                        elev_state, head_cm, ankle_rel, kps,
-                        idx + 1, cal is not None)
+            draw_person(frame, box, helmet, vest, off_floor, kps, idx + 1)
 
             if helmet != "OK" or vest != "OK":
                 ppe_violations += 1
-            if elev_state == "elevated":
-                elev_alerts += 1
-            elif elev_state == "bending":
-                bending_alerts += 1
+            if off_floor:
+                feet_alerts += 1
 
-        # Alert banners
+        # Banners
         banner_y = 0
-        if elev_alerts > 0:
-            cv2.rectangle(frame, (0, banner_y), (w, banner_y + 45), (0, 0, 160), -1)
-            cv2.putText(frame, f"ELEVATION ALERT - {elev_alerts} person(s) elevated above {ALERT_HEIGHT_CM}cm",
-                        (10, banner_y + 32), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2)
-            banner_y += 45
-        if bending_alerts > 0:
+        if feet_alerts > 0:
             cv2.rectangle(frame, (0, banner_y), (w, banner_y + 45), (0, 100, 200), -1)
-            cv2.putText(frame, f"FEET OFF FLOOR - {bending_alerts} person(s) elevated (bending/climbing)",
+            cv2.putText(frame, f"FEET OFF FLOOR - {feet_alerts} person(s) not on floor",
                         (10, banner_y + 32), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2)
             banner_y += 45
         if ppe_violations > 0:
