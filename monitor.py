@@ -15,11 +15,48 @@ import cv2
 import json
 import argparse
 import os
+import sqlite3
 import threading
 import time
 import numpy as np
 from collections import deque
+from datetime import datetime
 from ultralytics import YOLO
+
+# ── Incident logging ───────────────────────────────────────────────────────────
+DB_FILE          = "incidents.db"
+SNAPSHOT_DIR     = "snapshots"
+COOLDOWN_SEC     = 15   # log same violation at most once per N seconds per person
+
+def init_db():
+    os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+    con = sqlite3.connect(DB_FILE, check_same_thread=False)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS incidents (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp     TEXT    NOT NULL,
+            camera_source TEXT    NOT NULL,
+            violation     TEXT    NOT NULL,
+            person_id     INTEGER,
+            detail        TEXT,
+            snapshot_path TEXT
+        )
+    """)
+    con.commit()
+    return con
+
+def log_incident(con, source, violation, person_id, detail, frame):
+    ts        = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    fname     = datetime.now().strftime("%Y%m%d_%H%M%S") + f"_P{person_id}_{violation}.jpg"
+    snap_path = os.path.join(SNAPSHOT_DIR, fname)
+    cv2.imwrite(snap_path, frame)
+    con.execute(
+        "INSERT INTO incidents (timestamp,camera_source,violation,person_id,detail,snapshot_path) "
+        "VALUES (?,?,?,?,?,?)",
+        (ts, str(source), violation, person_id, detail, snap_path)
+    )
+    con.commit()
+    print(f"[INCIDENT] {ts} | {violation} | P{person_id} | {detail}")
 
 # ── config ─────────────────────────────────────────────────────────────────────
 
@@ -345,12 +382,24 @@ def run(source):
     print(f"[INFO] Floor map: {'YES (' + str(len(floor_points)) + ' points)' if floor_points else 'NO — run calibrate.py to enable'}")
     print("[INFO] Press 'q' to quit.\n")
 
+    con     = init_db()
+    print(f"[INFO] Logging incidents to: {DB_FILE}  |  Snapshots: {SNAPSHOT_DIR}/")
+
     cap = FrameReader(source)
     w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     print(f"[INFO] Stream: {w}x{h}")
 
-    tracker = PersonTracker()
+    tracker     = PersonTracker()
+    last_logged = {}   # "P{n}_{violation}" → epoch seconds of last log
+
+    def should_log(pid, violation):
+        key  = f"P{pid}_{violation}"
+        now  = time.time()
+        if now - last_logged.get(key, 0) >= COOLDOWN_SEC:
+            last_logged[key] = now
+            return True
+        return False
 
     while True:
         ret, frame = cap.read()
@@ -397,12 +446,21 @@ def run(source):
             else:
                 off_floor, kps = False, None
 
-            draw_person(frame, box, helmet, vest, off_floor, kps, idx + 1)
+            pid = idx + 1
+            draw_person(frame, box, helmet, vest, off_floor, kps, pid)
 
             if helmet != "OK" or vest != "OK":
                 ppe_violations += 1
             if off_floor:
                 feet_alerts += 1
+
+            # ── Incident logging ──────────────────────────────────────────────
+            if off_floor and should_log(pid, "FEET_OFF_FLOOR"):
+                log_incident(con, source, "FEET_OFF_FLOOR", pid, "feet not on floor", frame)
+            if helmet != "OK" and should_log(pid, "NO_HELMET"):
+                log_incident(con, source, "NO_HELMET", pid, f"helmet={helmet}", frame)
+            if vest != "OK" and should_log(pid, "NO_VEST"):
+                log_incident(con, source, "NO_VEST", pid, f"vest={vest}", frame)
 
         # Banners
         banner_y = 0
@@ -418,13 +476,17 @@ def run(source):
 
         cv2.putText(frame, f"People: {len(smoothed_ppe)}", (10, h - 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+        cv2.putText(frame, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    (w - 220, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1)
 
         cv2.imshow("Safety Monitor", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
     cap.release()
+    con.close()
     cv2.destroyAllWindows()
+    print(f"[INFO] Stopped. Incidents saved to {DB_FILE}")
 
 
 if __name__ == "__main__":
