@@ -78,10 +78,10 @@ OK_THRESH      = 6
 IOU_MATCH      = 0.25
 
 # Feet-off-floor thresholds
-ANKLE_BOX_THRESH  = 0.10  # ankle > 10% of box height above box bottom → feet off floor
+ANKLE_BOX_THRESH  = 0.07  # ankle > 7% of box height above box bottom → feet off floor
 FLOOR_MAP_THRESH  = 0.14  # ankle > 14% of box height above mapped floor → feet off floor
 FLOOR_DEPTH_RADIUS = 80   # max pixel distance in y to nearest calibration point — if farther, skip floor-map check
-OFF_FLOOR_THRESH   = 3    # frames out of SMOOTH_FRAMES needed to declare off-floor
+OFF_FLOOR_THRESH   = 5    # frames out of SMOOTH_FRAMES needed to declare off-floor (sustained elevation only)
 FOOT_CONF_MIN     = 0.40
 MIN_ANKLES        = 1
 
