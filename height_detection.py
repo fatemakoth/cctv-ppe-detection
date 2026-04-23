@@ -11,8 +11,8 @@ ALERT_HEIGHT_CM   = 185    # head above this = RED
 MIN_CONFIDENCE    = 0.50
 MIN_BOX_HEIGHT_PX = 80
 MIN_ASPECT_RATIO  = 0.6
-FOOT_CONF_MIN              = 0.40   # min keypoint confidence to trust ankle position
-FOOT_ELEVATION_THRESHOLD_CM = 28   # ankles more than this many cm above floor_y → off floor
+FOOT_CONF_MIN              = 0.34   # min keypoint confidence to trust ankle position
+FOOT_ELEVATION_THRESHOLD_CM = 60  # ankles more than this many cm above floor_y → off floor
                                     # raise if far-back people false-trigger; lower to catch low chairs
 
 LEFT_ANKLE  = 15
