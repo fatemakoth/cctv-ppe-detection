@@ -13,7 +13,8 @@ MIN_BOX_HEIGHT_PX = 80
 MIN_ASPECT_RATIO  = 0.6
 FOOT_CONF_MIN              = 0.34   # min keypoint confidence to trust ankle position
 FOOT_ELEVATION_THRESHOLD_CM = 60  # ankles more than this many cm above floor_y → off floor
-                                    # raise if far-back people false-trigger; lower to catch low chairs
+FOOT_CONF_MIN              = 0.40   # min keypoint confidence to trust ankle position
+FOOT_ELEVATION_THRESHOLD_CM = 60   # ankles more than this many cm above floor_y → off floor                                    # raise if far-back people false-trigger; lower to catch low chairs
 
 LEFT_ANKLE  = 15
 RIGHT_ANKLE = 16
@@ -100,10 +101,10 @@ def classify(x1, y1, x2, y2, floor_y, pixels_per_cm, feet_on_floor):
     head_height_cm = (floor_y - y1) / pixels_per_cm
     body_height_cm = (y2 - y1)     / pixels_per_cm
 
-    if head_height_cm > ALERT_HEIGHT_CM:
-        state = "elevated"               # RED — head above threshold
+    if head_height_cm > ALERT_HEIGHT_CM and feet_on_floor is False:
+        state = "elevated"               # RED — head above threshold AND feet off floor
     elif feet_on_floor is False:
-        state = "bending"                # ORANGE — ankles confirmed off floor
+        state = "bending"                # ORANGE — feet off floor but head below threshold
     else:
         state = "ok"                     # GREEN — on floor or inconclusive (safe default)
 
