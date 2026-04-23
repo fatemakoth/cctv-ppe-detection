@@ -205,28 +205,42 @@ def manual_measure(cap, w, h):
 
 def floor_map_mode(cap, w, h):
     """
-    User clicks floor points at different positions and depths.
-    Shows fitted line in real-time.
+    User clicks floor points at different positions and depths on a frozen frame.
+    Shows fitted line in real-time as points are added.
     Returns list of [x, y] pairs, or None if cancelled.
     """
     floor_clicks.clear()
     cv2.setMouseCallback("Calibration", on_click_floor)
 
-    print("\n[FLOOR MAP] Click on the floor at different positions across the frame.")
-    print("  Click near/far, left/centre/right — aim for 6-10 points spread across the floor.")
-    print("  'u' — undo last point")
-    print("  'd' — done (need at least 4 points)")
-    print("  'r' — reset all points")
-    print("  'q' — quit without saving\n")
+    print("\n[FLOOR MAP] Capturing snapshot — step aside from the floor area...")
+    print("  Click on the FLOOR surface at different positions:")
+    print("  — near the camera AND far from it")
+    print("  — left side, centre, right side")
+    print("  Aim for 6-10 points spread across the walkable floor.")
+    print("  'u' — undo last point  |  'r' — reset  |  'd' — done (4+ pts)  |  'q' — quit\n")
 
-    snapshot = None
-    while True:
+    # 2-second countdown so the user can clear the floor area
+    start = time.time()
+    while time.time() - start < 2:
         ret, frame = cap.read()
         if not ret:
             break
-        snapshot = frame.copy()
-        display  = frame.copy()
+        remaining = 2 - int(time.time() - start)
+        cv2.putText(frame, f"Capturing snapshot in {remaining}s — step aside...",
+                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 80, 255), 3)
+        cv2.imshow("Calibration", frame)
+        cv2.waitKey(1)
 
+    # Grab the frozen frame — all clicks happen on this static image
+    ret, snapshot = cap.read()
+    if not ret or snapshot is None:
+        print("[ERROR] Could not capture frame.")
+        return None, None
+
+    print("[FLOOR MAP] Frame frozen. Click floor points now.")
+
+    while True:
+        display = snapshot.copy()
         draw_floor_fit(display, floor_clicks, w)
 
         n = len(floor_clicks)
@@ -234,13 +248,12 @@ def floor_map_mode(cap, w, h):
         status += "d=DONE  " if n >= 4 else f"need {4 - n} more  "
         status += "q=quit"
         cv2.putText(display, status, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
-
-        if n >= 4:
-            cv2.putText(display, "Floor line fit — looks good? Press 'd' to confirm.",
-                        (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.putText(display, "Click the FLOOR: spread near/far and left/centre/right",
+                    (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                    (0, 255, 0) if n >= 4 else (200, 200, 200), 2)
 
         cv2.imshow("Calibration", display)
-        key = cv2.waitKey(1) & 0xFF
+        key = cv2.waitKey(20) & 0xFF
 
         if key == ord('u') and floor_clicks:
             removed = floor_clicks.pop()
@@ -256,8 +269,6 @@ def floor_map_mode(cap, w, h):
                 return list(floor_clicks), snapshot
         elif key == ord('q'):
             return None, snapshot
-
-    return None, snapshot
 
 
 def load_existing_calibration():
