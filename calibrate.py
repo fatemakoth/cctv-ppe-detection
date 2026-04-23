@@ -250,7 +250,10 @@ def floor_map_mode(cap, w, h):
         status += "d=DONE  " if n >= 4 else f"need {4 - n} more  "
         status += "q=quit"
         cv2.putText(display, status, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
-        hint = "IMPORTANT: click the BACK WALL base + near floor + middle — all depths!" if n < 4 else "Good — include far-back wall base if not done. Press 'd' when done."
+        if n >= 2:
+            cv2.putText(display, "Green line = current fit (normal to see it move as you add points)",
+                        (10, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (160, 160, 160), 1)
+        hint = "Click: BACK WALL base + middle depth + near floor. Cover ALL areas you walk!" if n < 4 else "Good coverage? Press 'd'. Add far-back wall points if not yet done."
         cv2.putText(display, hint, (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                     (0, 255, 0) if n >= 4 else (0, 140, 255), 2)
 

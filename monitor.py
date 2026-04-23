@@ -80,6 +80,7 @@ IOU_MATCH      = 0.25
 # Feet-off-floor thresholds
 ANKLE_BOX_THRESH  = 0.13  # ankle > 13% of box height above box bottom → feet off floor
 FLOOR_MAP_THRESH  = 0.20  # ankle > 20% of box height above mapped floor → feet off floor
+FLOOR_DEPTH_RADIUS = 120  # max pixel distance in y to nearest calibration point — if farther, skip floor-map check
 FOOT_CONF_MIN     = 0.40
 MIN_ANKLES        = 1
 
@@ -110,33 +111,34 @@ def load_calibration():
         print("[INFO] No calibration.json — using relative ankle check only.")
         return None
 
-def floor_y_at(x, floor_points):
+def floor_y_at(ankle_x, person_y2, floor_points):
     """
-    Given a list of (px, py) floor calibration points, return the interpolated
-    floor y-pixel at horizontal position x.
-    Uses a linear fit across all points (robust for perspective floors).
+    Return expected floor y at the person's depth, or None if no calibration coverage.
+
+    Uses Gaussian weighting by both y-distance (depth) and x-distance.
+    Returns None when the nearest calibration point in y is farther than
+    FLOOR_DEPTH_RADIUS — this prevents false positives in uncalibrated areas.
     """
     if not floor_points or len(floor_points) < 2:
         return None
-    xs = np.array([p[0] for p in floor_points], dtype=float)
-    ys = np.array([p[1] for p in floor_points], dtype=float)
-    # Linear regression: floor_y = a*x + b
-    coeffs = np.polyfit(xs, ys, 1)
-    return float(np.polyval(coeffs, x))
+    pts = np.array(floor_points, dtype=float)
+    dy  = np.abs(pts[:, 1] - person_y2)
+
+    # No calibration data near this depth → skip floor-map check entirely
+    if np.min(dy) > FLOOR_DEPTH_RADIUS:
+        return None
+
+    dx      = np.abs(pts[:, 0] - ankle_x)
+    weights = np.exp(-(dy / 80) ** 2) * np.exp(-(dx / 400) ** 2)
+    total_w = np.sum(weights)
+    if total_w < 1e-6:
+        return None
+    return float(np.dot(weights, pts[:, 1]) / total_w)
 
 def draw_floor_map(frame, floor_points):
-    """Draw the calibrated floor points and fitted floor line."""
-    if not floor_points or len(floor_points) < 2:
-        return
-    w = frame.shape[1]
-    xs = np.array([p[0] for p in floor_points], dtype=float)
-    ys = np.array([p[1] for p in floor_points], dtype=float)
-    coeffs = np.polyfit(xs, ys, 1)
-    y_left  = int(np.polyval(coeffs, 0))
-    y_right = int(np.polyval(coeffs, w - 1))
-    cv2.line(frame, (0, y_left), (w - 1, y_right), (0, 180, 0), 1)
+    """Draw calibration dots only — no regression line (line was misleading)."""
     for px, py in floor_points:
-        cv2.circle(frame, (int(px), int(py)), 5, (0, 255, 0), -1)
+        cv2.circle(frame, (int(px), int(py)), 4, (0, 200, 0), -1)
 
 
 # ── threaded RTSP reader ───────────────────────────────────────────────────────
@@ -304,9 +306,8 @@ def check_feet(box, kps, floor_points):
 
     # ── Check 1: floor map ────────────────────────────────────────────────────
     if floor_points and len(floor_points) >= 2:
-        expected_floor_y = floor_y_at(avg_ax, floor_points)
+        expected_floor_y = floor_y_at(avg_ax, y2, floor_points)
         if expected_floor_y is not None:
-            # How far above the floor is the ankle, normalized by box height
             above_floor = (expected_floor_y - avg_ay) / box_h
             if above_floor > FLOOR_MAP_THRESH:
                 ankle_rel = (y2 - avg_ay) / box_h
@@ -338,21 +339,22 @@ def draw_ankle_dots(frame, kps, off_floor):
 
 def draw_person(frame, box, helmet, vest, off_floor, kps, pid):
     x1, y1, x2, y2 = box
-    ppe_ok = helmet == "OK" and vest == "OK"
+    ppe_ok    = helmet == "OK" and vest == "OK"
+    ppe_alert = off_floor and not ppe_ok   # PPE alert only matters when elevated
 
-    if off_floor:
-        bc = (0, 140, 255)       # orange — feet off floor
-    elif not ppe_ok:
-        bc = (0, 0, 255)         # red — PPE violation
+    if off_floor and ppe_alert:
+        bc = (0, 0, 255)         # red — elevated + missing PPE (highest risk)
+    elif off_floor:
+        bc = (0, 140, 255)       # orange — elevated but PPE ok
     else:
-        bc = (0, 200, 0)         # green — all good
+        bc = (0, 200, 0)         # green — on floor (PPE not enforced at floor level)
 
     cv2.rectangle(frame, (x1, y1), (x2, y2), bc, 2)
 
     for i, (txt, col) in enumerate([
         (f"P{pid}",           bc),
-        (f"Helmet: {helmet}", _ppe_col(helmet)),
-        (f"Vest  : {vest}",   _ppe_col(vest)),
+        (f"Helmet: {helmet}", _ppe_col(helmet) if off_floor else (180, 180, 180)),
+        (f"Vest  : {vest}",   _ppe_col(vest)   if off_floor else (180, 180, 180)),
     ]):
         cv2.putText(frame, txt, (x1, y1 - 10 - i * 18),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.52, col, 2)
@@ -362,7 +364,7 @@ def draw_person(frame, box, helmet, vest, off_floor, kps, pid):
         cv2.putText(frame, "!! FEET OFF FLOOR !!",
                     (x1, bottom_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 140, 255), 2)
         bottom_y += 22
-    if not ppe_ok:
+    if ppe_alert:
         cv2.putText(frame, "!! PPE VIOLATION !!",
                     (x1, bottom_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
@@ -449,18 +451,19 @@ def run(source):
             pid = idx + 1
             draw_person(frame, box, helmet, vest, off_floor, kps, pid)
 
-            if helmet != "OK" or vest != "OK":
-                ppe_violations += 1
             if off_floor:
                 feet_alerts += 1
+                if helmet != "OK" or vest != "OK":
+                    ppe_violations += 1   # PPE violation only counts when elevated
 
             # ── Incident logging ──────────────────────────────────────────────
             if off_floor and should_log(pid, "FEET_OFF_FLOOR"):
                 log_incident(con, source, "FEET_OFF_FLOOR", pid, "feet not on floor", frame)
-            if helmet != "OK" and should_log(pid, "NO_HELMET"):
-                log_incident(con, source, "NO_HELMET", pid, f"helmet={helmet}", frame)
-            if vest != "OK" and should_log(pid, "NO_VEST"):
-                log_incident(con, source, "NO_VEST", pid, f"vest={vest}", frame)
+            if off_floor:   # PPE incidents only logged when elevated
+                if helmet != "OK" and should_log(pid, "NO_HELMET"):
+                    log_incident(con, source, "NO_HELMET", pid, f"helmet={helmet}", frame)
+                if vest != "OK" and should_log(pid, "NO_VEST"):
+                    log_incident(con, source, "NO_VEST", pid, f"vest={vest}", frame)
 
         # Banners
         banner_y = 0
