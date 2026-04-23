@@ -19,8 +19,10 @@ VEST_NO_CONF    = 0.30
 
 MIN_BOX_HEIGHT  = 80
 MIN_ASPECT      = 0.6
-SMOOTH_FRAMES   = 8
-IOU_MATCH       = 0.25
+SMOOTH_FRAMES    = 10
+MISSING_THRESH   = 4   # frames out of SMOOTH_FRAMES needed to declare MISSING
+OK_THRESH        = 6   # frames out of SMOOTH_FRAMES needed to declare OK
+IOU_MATCH        = 0.25
 
 PERSON_CLASS = 0
 HAS_HELMET   = "Hardhat"
@@ -127,11 +129,11 @@ class PersonTracker:
         return results
 
 def _vote(hist):
-    c = {"OK": 0, "MISSING": 0, "?": 0}
-    for s in hist: c[s] += 1
-    if c["MISSING"] >= 1:  return "MISSING"
-    if c["OK"] > c["?"]:  return "OK"
-    return "?"
+    c = {"OK": 0, "MISSING": 0}
+    for s in hist: c[s] = c.get(s, 0) + 1
+    if c.get("OK", 0) >= OK_THRESH:        return "OK"
+    if c.get("MISSING", 0) >= MISSING_THRESH: return "MISSING"
+    return "MISSING"   # default: safety-first while building up history
 
 
 # ── region-based PPE detection ─────────────────────────────────────────────────
