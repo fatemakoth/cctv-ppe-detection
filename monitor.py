@@ -79,8 +79,9 @@ IOU_MATCH      = 0.25
 
 # Feet-off-floor thresholds
 ANKLE_BOX_THRESH  = 0.10  # ankle > 10% of box height above box bottom → feet off floor
-FLOOR_MAP_THRESH  = 0.20  # ankle > 20% of box height above mapped floor → feet off floor
+FLOOR_MAP_THRESH  = 0.14  # ankle > 14% of box height above mapped floor → feet off floor
 FLOOR_DEPTH_RADIUS = 80   # max pixel distance in y to nearest calibration point — if farther, skip floor-map check
+OFF_FLOOR_THRESH   = 3    # frames out of SMOOTH_FRAMES needed to declare off-floor
 FOOT_CONF_MIN     = 0.40
 MIN_ANKLES        = 1
 
@@ -208,9 +209,10 @@ class PersonTracker:
         self._next  = 0
 
     def update(self, detections):
+        """detections: list of (box, helmet, vest, off_floor, kps)"""
         matched = set()
         results = []
-        for box, h, v in detections:
+        for box, h, v, off, kps in detections:
             best_id, best_s = None, IOU_MATCH
             for tid, t in self.tracks.items():
                 s = iou(box, t["box"])
@@ -219,15 +221,18 @@ class PersonTracker:
             if best_id is None:
                 best_id = self._next
                 self._next += 1
-                self.tracks[best_id] = {"box":    box,
-                                        "helmet": deque(maxlen=SMOOTH_FRAMES),
-                                        "vest":   deque(maxlen=SMOOTH_FRAMES)}
+                self.tracks[best_id] = {"box":       box,
+                                        "helmet":    deque(maxlen=SMOOTH_FRAMES),
+                                        "vest":      deque(maxlen=SMOOTH_FRAMES),
+                                        "off_floor": deque(maxlen=SMOOTH_FRAMES)}
             t = self.tracks[best_id]
             t["box"] = box
             t["helmet"].append(h)
             t["vest"].append(v)
+            t["off_floor"].append(off)
             matched.add(best_id)
-            results.append((box, _vote(t["helmet"]), _vote(t["vest"])))
+            results.append((box, _vote(t["helmet"]), _vote(t["vest"]),
+                            _vote_bool(t["off_floor"]), kps))
         self.tracks = {k: v for k, v in self.tracks.items() if k in matched}
         return results
 
@@ -237,6 +242,10 @@ def _vote(hist):
     if c.get("OK", 0) >= OK_THRESH:            return "OK"
     if c.get("MISSING", 0) >= MISSING_THRESH:  return "MISSING"
     return "MISSING"
+
+def _vote_bool(hist):
+    """Declare off-floor when OFF_FLOOR_THRESH or more of recent frames detected it."""
+    return sum(1 for x in hist if x) >= OFF_FLOOR_THRESH
 
 
 # ── PPE detection ──────────────────────────────────────────────────────────────
@@ -415,8 +424,7 @@ def run(source):
 
         pose_res = pose_model(frame, verbose=False, conf=PERSON_CONF)[0]
 
-        raw_ppe      = []
-        elev_results = []
+        raw_detections = []
 
         for i, box in enumerate(pose_res.boxes):
             if int(box.cls) != 0:
@@ -431,23 +439,16 @@ def run(source):
             pbox = (x1, y1, x2, y2)
             kps  = pose_res.keypoints[i] if pose_res.keypoints is not None else None
 
-            helmet = check_helmet(frame, pbox, ppe_model, ppe_names, h)
-            vest   = check_vest(frame, pbox, ppe_model, ppe_names, h)
-            raw_ppe.append((pbox, helmet, vest))
+            helmet    = check_helmet(frame, pbox, ppe_model, ppe_names, h)
+            vest      = check_vest(frame, pbox, ppe_model, ppe_names, h)
+            off_floor, _ = check_feet(pbox, kps, floor_points)
+            raw_detections.append((pbox, helmet, vest, off_floor, kps))
 
-            off_floor, ankle_rel = check_feet(pbox, kps, floor_points)
-            elev_results.append((pbox, off_floor, kps))
-
-        smoothed_ppe  = tracker.update(raw_ppe)
+        smoothed     = tracker.update(raw_detections)
         ppe_violations = 0
         feet_alerts    = 0
 
-        for idx, (box, helmet, vest) in enumerate(smoothed_ppe):
-            if idx < len(elev_results):
-                _, off_floor, kps = elev_results[idx]
-            else:
-                off_floor, kps = False, None
-
+        for idx, (box, helmet, vest, off_floor, kps) in enumerate(smoothed):
             pid = idx + 1
             draw_person(frame, box, helmet, vest, off_floor, kps, pid)
 
@@ -477,7 +478,7 @@ def run(source):
             cv2.putText(frame, f"PPE VIOLATION - {ppe_violations} person(s) missing PPE",
                         (10, banner_y + 32), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2)
 
-        cv2.putText(frame, f"People: {len(smoothed_ppe)}", (10, h - 15),
+        cv2.putText(frame, f"People: {len(smoothed)}", (10, h - 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
         cv2.putText(frame, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     (w - 220, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1)
