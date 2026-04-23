@@ -213,10 +213,12 @@ def floor_map_mode(cap, w, h):
     cv2.setMouseCallback("Calibration", on_click_floor)
 
     print("\n[FLOOR MAP] Capturing snapshot — step aside from the floor area...")
-    print("  Click on the FLOOR surface at different positions:")
-    print("  — near the camera AND far from it")
-    print("  — left side, centre, right side")
-    print("  Aim for 6-10 points spread across the walkable floor.")
+    print("  Click on the FLOOR surface at ALL positions you walk:")
+    print("  — BACK WALL: where the far wall meets the floor (most important!)")
+    print("  — NEAR: floor close to the camera (bottom of frame)")
+    print("  — MIDDLE: floor in between")
+    print("  — Left side, centre, right side at each depth")
+    print("  Aim for 8-12 points. Cover ALL depths — missing far-back points causes false alarms.")
     print("  'u' — undo last point  |  'r' — reset  |  'd' — done (4+ pts)  |  'q' — quit\n")
 
     # 2-second countdown so the user can clear the floor area
@@ -248,9 +250,9 @@ def floor_map_mode(cap, w, h):
         status += "d=DONE  " if n >= 4 else f"need {4 - n} more  "
         status += "q=quit"
         cv2.putText(display, status, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
-        cv2.putText(display, "Click the FLOOR: spread near/far and left/centre/right",
-                    (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                    (0, 255, 0) if n >= 4 else (200, 200, 200), 2)
+        hint = "IMPORTANT: click the BACK WALL base + near floor + middle — all depths!" if n < 4 else "Good — include far-back wall base if not done. Press 'd' when done."
+        cv2.putText(display, hint, (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                    (0, 255, 0) if n >= 4 else (0, 140, 255), 2)
 
         cv2.imshow("Calibration", display)
         key = cv2.waitKey(20) & 0xFF
