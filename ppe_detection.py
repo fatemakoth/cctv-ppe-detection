@@ -8,24 +8,31 @@ from ultralytics import YOLO
 
 # ── config ─────────────────────────────────────────────────────────────────────
 
-PERSON_MODEL    = "yolov8s.pt"       # strong pretrained COCO model for person detection
+PERSON_MODEL    = "yolov8s.pt"
 PPE_MODEL_PATH  = "ppe_model/ppe_best.pt"
 
 PERSON_CONF     = 0.50
-POSITIVE_CONF   = 0.65      # must be confident to say Hardhat/Vest is present (OK)
-NEGATIVE_CONF   = 0.30      # lower bar to flag NO-Hardhat/NO-Vest (MISSING)
+HELMET_OK_CONF  = 0.70      # must be very confident to say helmet is present
+HELMET_NO_CONF  = 0.30      # lower bar to flag NO-Hardhat
+VEST_OK_CONF    = 0.65
+VEST_NO_CONF    = 0.30
+
 MIN_BOX_HEIGHT  = 80
 MIN_ASPECT      = 0.6
-SMOOTH_FRAMES   = 10
+SMOOTH_FRAMES   = 8
 IOU_MATCH       = 0.25
 
-PERSON_CLASS    = 0                  # COCO class index for person in yolov8s
+PERSON_CLASS = 0
+HAS_HELMET   = "Hardhat"
+NO_HELMET    = "NO-Hardhat"
+HAS_VEST     = "Safety Vest"
+NO_VEST      = "NO-Safety Vest"
 
-HAS_HELMET  = "Hardhat"
-NO_HELMET   = "NO-Hardhat"
-HAS_VEST    = "Safety Vest"
-NO_VEST     = "NO-Safety Vest"
-PPE_CLASSES = {HAS_HELMET, NO_HELMET, HAS_VEST, NO_VEST}
+# Body region fractions of person bounding box height
+HEAD_TOP     = 0.0
+HEAD_BOT     = 0.30   # top 30% = head
+TORSO_TOP    = 0.15
+TORSO_BOT    = 0.70   # 15-70% = torso/vest area
 
 
 # ── threaded RTSP reader ───────────────────────────────────────────────────────
@@ -78,13 +85,13 @@ def iou(a, b):
         return 0.0
     return inter / ((a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - inter)
 
-def overlap_frac(ppe_box, person_box):
-    """Fraction of ppe_box that lies inside person_box."""
-    ix1, iy1 = max(ppe_box[0], person_box[0]), max(ppe_box[1], person_box[1])
-    ix2, iy2 = min(ppe_box[2], person_box[2]), min(ppe_box[3], person_box[3])
-    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
-    area  = max(1, (ppe_box[2]-ppe_box[0]) * (ppe_box[3]-ppe_box[1]))
-    return inter / area
+def region_crop(frame, pbox, top_frac, bot_frac, frame_h):
+    x1, y1, x2, y2 = pbox
+    ph = y2 - y1
+    ry1 = max(0, y1 + int(ph * top_frac))
+    ry2 = min(frame_h, y1 + int(ph * bot_frac))
+    crop = frame[ry1:ry2, x1:x2]
+    return crop if crop.size > 0 else None
 
 
 # ── temporal smoother ──────────────────────────────────────────────────────────
@@ -122,83 +129,97 @@ class PersonTracker:
 def _vote(hist):
     c = {"OK": 0, "MISSING": 0, "?": 0}
     for s in hist: c[s] += 1
-    if c["MISSING"] > 0:   return "MISSING"
-    if c["OK"] > c["?"]:   return "OK"
+    if c["MISSING"] >= 1:  return "MISSING"
+    if c["OK"] > c["?"]:  return "OK"
     return "?"
 
 
-# ── detection ──────────────────────────────────────────────────────────────────
+# ── region-based PPE detection ─────────────────────────────────────────────────
+
+def check_helmet(frame, pbox, ppe_model, ppe_names, frame_h):
+    """
+    Crop the head region (top 30% of person box).
+    Closed-world: if no Hardhat detected with sufficient confidence → MISSING.
+    This avoids the model's bias of labelling every head as "Hardhat".
+    """
+    crop = region_crop(frame, pbox, HEAD_TOP, HEAD_BOT, frame_h)
+    if crop is None:
+        return "MISSING"
+
+    results = ppe_model(crop, verbose=False, conf=HELMET_NO_CONF)[0]
+    names   = ppe_names
+
+    best_hardhat = 0.0
+    best_no_hardhat = 0.0
+    for box in results.boxes:
+        cls  = names[int(box.cls)]
+        conf = float(box.conf)
+        if cls == HAS_HELMET:
+            best_hardhat    = max(best_hardhat, conf)
+        elif cls == NO_HELMET:
+            best_no_hardhat = max(best_no_hardhat, conf)
+
+    if best_no_hardhat >= HELMET_NO_CONF:
+        return "MISSING"
+    if best_hardhat >= HELMET_OK_CONF:
+        return "OK"
+    # Head visible but helmet not confidently detected → treat as MISSING
+    return "MISSING"
+
+def check_vest(frame, pbox, ppe_model, ppe_names, frame_h):
+    """
+    Crop the torso region (15-70% of person box).
+    Closed-world: if no Safety Vest detected confidently → MISSING.
+    """
+    crop = region_crop(frame, pbox, TORSO_TOP, TORSO_BOT, frame_h)
+    if crop is None:
+        return "MISSING"
+
+    results = ppe_model(crop, verbose=False, conf=VEST_NO_CONF)[0]
+    names   = ppe_names
+
+    best_vest    = 0.0
+    best_no_vest = 0.0
+    for box in results.boxes:
+        cls  = names[int(box.cls)]
+        conf = float(box.conf)
+        if cls == HAS_VEST:
+            best_vest    = max(best_vest, conf)
+        elif cls == NO_VEST:
+            best_no_vest = max(best_no_vest, conf)
+
+    if best_no_vest >= VEST_NO_CONF:
+        return "MISSING"
+    if best_vest >= VEST_OK_CONF:
+        return "OK"
+    return "MISSING"
 
 def detect_frame(frame, person_model, ppe_model, ppe_names, frame_w, frame_h):
-    # Step 1: detect persons with strong pretrained model
     p_results = person_model(frame, verbose=False, conf=PERSON_CONF, classes=[PERSON_CLASS])[0]
-    persons = []
+    detections = []
     for box in p_results.boxes:
         x1, y1, x2, y2 = map(int, box.xyxy[0])
         x1, y1 = max(0, x1), max(0, y1)
         x2, y2 = min(frame_w, x2), min(frame_h, y2)
         bh, bw = y2 - y1, x2 - x1
-        if bw > 0 and bh >= MIN_BOX_HEIGHT and bh / max(bw, 1) >= MIN_ASPECT:
-            persons.append((x1, y1, x2, y2))
-
-    if not persons:
-        return []
-
-    # Step 2: run PPE model on full frame — use lowest threshold, filter per class below
-    ppe_results = ppe_model(frame, verbose=False, conf=NEGATIVE_CONF)[0]
-    ppe_hits = []
-    for box in ppe_results.boxes:
-        cls  = ppe_names[int(box.cls)]
-        conf = float(box.conf)
-        if cls not in PPE_CLASSES:
+        if bw == 0 or bh < MIN_BOX_HEIGHT or bh / max(bw, 1) < MIN_ASPECT:
             continue
-        b = tuple(map(int, box.xyxy[0]))
-        ppe_hits.append((b, cls, conf))
-
-    # Step 3: associate PPE items to persons by overlap
-    detections = []
-    for pbox in persons:
-        helmets = []
-        vests   = []
-        for ppe_box, cls, conf in ppe_hits:
-            if overlap_frac(ppe_box, pbox) < 0.35:
-                continue
-            if cls in (HAS_HELMET, NO_HELMET):
-                helmets.append((cls, conf))
-            elif cls in (HAS_VEST, NO_VEST):
-                vests.append((cls, conf))
-
-        helmet = _resolve(helmets, HAS_HELMET, NO_HELMET)
-        vest   = _resolve(vests,   HAS_VEST,   NO_VEST)
+        pbox  = (x1, y1, x2, y2)
+        helmet = check_helmet(frame, pbox, ppe_model, ppe_names, frame_h)
+        vest   = check_vest(frame, pbox, ppe_model, ppe_names, frame_h)
         detections.append((pbox, helmet, vest))
-
     return detections
-
-def _resolve(label_confs, pos, neg):
-    """Apply split thresholds: positive labels need POSITIVE_CONF, negatives need NEGATIVE_CONF."""
-    if not label_confs:
-        return "?"
-    has = any(l == pos and c >= POSITIVE_CONF for l, c in label_confs)
-    no  = any(l == neg and c >= NEGATIVE_CONF for l, c in label_confs)
-    if has and not no:  return "OK"
-    if no:              return "MISSING"
-    return "?"
 
 
 # ── drawing ────────────────────────────────────────────────────────────────────
 
 def _col(s):
-    return (0, 200, 0) if s == "OK" else (0, 0, 255) if s == "MISSING" else (0, 165, 255)
-
-def _is_violation(status):
-    return status in ("MISSING", "?")   # unverified = flagged (safety-first)
+    return (0, 200, 0) if s == "OK" else (0, 0, 255)
 
 def draw_person(frame, box, helmet, vest, pid):
     x1, y1, x2, y2 = box
-    h_viol = _is_violation(helmet)
-    v_viol = _is_violation(vest)
-    bc = (0, 0, 255) if (helmet == "MISSING" or vest == "MISSING") else \
-         (0, 165, 255) if (h_viol or v_viol) else (0, 200, 0)
+    all_ok = helmet == "OK" and vest == "OK"
+    bc     = (0, 200, 0) if all_ok else (0, 0, 255)
     cv2.rectangle(frame, (x1, y1), (x2, y2), bc, 2)
     for i, (txt, col) in enumerate([
         (f"P{pid}",           bc),
@@ -207,7 +228,7 @@ def draw_person(frame, box, helmet, vest, pid):
     ]):
         cv2.putText(frame, txt, (x1, y1 - 10 - i * 18),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, col, 2)
-    if h_viol or v_viol:
+    if not all_ok:
         cv2.putText(frame, "!! PPE VIOLATION !!",
                     (x1, y2 + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
@@ -219,7 +240,6 @@ def run(source):
     person_model = YOLO(PERSON_MODEL)
     ppe_model    = YOLO(PPE_MODEL_PATH)
     ppe_names    = ppe_model.names
-    print(f"[INFO] PPE classes: {list(ppe_names.values())}")
     print("[INFO] Press 'q' to quit.\n")
 
     cap = FrameReader(source)
@@ -238,16 +258,15 @@ def run(source):
         raw      = detect_frame(frame, person_model, ppe_model, ppe_names, w, h)
         smoothed = tracker.update(raw)
 
-        violations = 0
+        violations = sum(1 for _, h, v in smoothed if h != "OK" or v != "OK")
+
         for pid, (box, helmet, vest) in enumerate(smoothed, 1):
             draw_person(frame, box, helmet, vest, pid)
-            if _is_violation(helmet) or _is_violation(vest):
-                violations += 1
 
         if violations:
             cv2.rectangle(frame, (0, 0), (w, 50), (0, 0, 180), -1)
             cv2.putText(frame,
-                        f"PPE VIOLATION — {violations} person(s) missing PPE",
+                        f"PPE VIOLATION - {violations} person(s) missing PPE",
                         (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
 
         cv2.putText(frame, f"People: {len(smoothed)}", (10, h - 15),
