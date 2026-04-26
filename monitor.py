@@ -59,6 +59,12 @@ MIN_ANKLES        = 1
 LEFT_ANKLE  = 15
 RIGHT_ANKLE = 16
 
+# Occlusion detection
+LEFT_SHOULDER     = 5
+RIGHT_SHOULDER    = 6
+SHOULDER_CONF_MIN = 0.40
+EDGE_MARGIN       = 10   # px from frame edge — box touching this is considered clipped
+
 # PPE crop regions (fraction of person box height)
 HEAD_TOP  = 0.0;  HEAD_BOT  = 0.30
 TORSO_TOP = 0.15; TORSO_BOT = 0.70
@@ -197,8 +203,9 @@ class PPESmoother:
 def _vote(hist):
     c = {}
     for s in hist: c[s] = c.get(s, 0) + 1
-    if c.get("OK", 0) >= OK_THRESH:            return "OK"
-    if c.get("MISSING", 0) >= MISSING_THRESH:  return "MISSING"
+    if c.get("UNVERIFIABLE", 0) > len(hist) // 2: return "UNVERIFIABLE"
+    if c.get("OK", 0) >= OK_THRESH:               return "OK"
+    if c.get("MISSING", 0) >= MISSING_THRESH:      return "MISSING"
     return "MISSING"
 
 def _vote_bool(hist):
@@ -207,6 +214,25 @@ def _vote_bool(hist):
 
 
 # ── PPE detection ──────────────────────────────────────────────────────────────
+
+def is_occluded(pbox, kps, frame_w, frame_h):
+    """
+    True when the person is significantly hidden behind something or cut off by the frame:
+      - bounding box clipped by frame edge (head/side cut off)
+      - both shoulders invisible (low keypoint confidence)
+    """
+    x1, y1, x2, y2 = pbox
+    if x1 <= EDGE_MARGIN or x2 >= frame_w - EDGE_MARGIN:
+        return True
+    if y1 <= EDGE_MARGIN:
+        return True
+    if kps is not None and kps.data is not None and len(kps.data) > 0:
+        kp_data = kps.data[0]
+        visible = sum(1 for idx in [LEFT_SHOULDER, RIGHT_SHOULDER]
+                      if float(kp_data[idx][2]) >= SHOULDER_CONF_MIN)
+        if visible == 0:
+            return True
+    return False
 
 def is_rear_facing(kps):
     if kps is None or kps.data is None or len(kps.data) == 0:
@@ -274,7 +300,11 @@ def check_feet(box, kps):
 # ── drawing ────────────────────────────────────────────────────────────────────
 
 def _ppe_col(s):
-    return (0, 200, 0) if s == "OK" else (0, 0, 255)
+    return {
+        "OK":           (0, 200, 0),
+        "MISSING":      (0, 0, 255),
+        "UNVERIFIABLE": (180, 180, 0),
+    }.get(s, (180, 180, 0))
 
 def draw_ankle_dots(frame, kps, off_floor):
     if kps is None or kps.data is None or len(kps.data) == 0:
@@ -289,16 +319,19 @@ def draw_ankle_dots(frame, kps, off_floor):
 
 def draw_person(frame, box, helmet, vest, off_floor, kps, pid):
     x1, y1, x2, y2 = box
-    rear      = is_rear_facing(kps)
-    ppe_ok    = helmet == "OK" and vest == "OK"
-    ppe_alert = off_floor and not ppe_ok   # PPE alert only matters when elevated
+    rear             = is_rear_facing(kps)
+    unverifiable     = helmet == "UNVERIFIABLE" or vest == "UNVERIFIABLE"
+    ppe_ok           = helmet == "OK" and vest == "OK"
+    ppe_alert        = off_floor and not ppe_ok and not unverifiable
 
-    if off_floor and ppe_alert:
-        bc = (0, 0, 255)         # red — elevated + missing PPE (highest risk)
+    if unverifiable:
+        bc = (180, 180, 0)       # yellow — cannot verify PPE
+    elif off_floor and ppe_alert:
+        bc = (0, 0, 255)         # red — elevated + missing PPE
     elif off_floor:
         bc = (0, 140, 255)       # orange — elevated but PPE ok
     else:
-        bc = (0, 200, 0)         # green — on floor (PPE not enforced at floor level)
+        bc = (0, 200, 0)         # green — on floor
 
     cv2.rectangle(frame, (x1, y1), (x2, y2), bc, 2)
 
@@ -382,10 +415,13 @@ def run(source):
         results        = []
         for conf, tid, pbox, i in candidates:
             kps  = pose_res.keypoints[i] if pose_res.keypoints is not None else None
-            rear = is_rear_facing(kps)
 
-            helmet       = check_helmet(frame, pbox, ppe_model, ppe_names, h, rear)
-            vest         = check_vest(frame, pbox, ppe_model, ppe_names, h, rear)
+            if is_occluded(pbox, kps, w, h):
+                helmet = vest = "UNVERIFIABLE"
+            else:
+                rear   = is_rear_facing(kps)
+                helmet = check_helmet(frame, pbox, ppe_model, ppe_names, h, rear)
+                vest   = check_vest(frame, pbox, ppe_model, ppe_names, h, rear)
             off_floor, _ = check_feet(pbox, kps)
 
             s_helmet, s_vest, sustained = smoother.update(tid, helmet, vest, off_floor)
@@ -409,7 +445,7 @@ def run(source):
             # ── Incident logging ──────────────────────────────────────────────
             if off_floor and should_log(pid, "FEET_OFF_FLOOR"):
                 logger.log(source, "FEET_OFF_FLOOR", pid, "feet not on floor", frame)
-            if off_floor:   # PPE incidents only logged when elevated
+            if off_floor and helmet != "UNVERIFIABLE" and vest != "UNVERIFIABLE":
                 if helmet != "OK" and should_log(pid, "NO_HELMET"):
                     logger.log(source, "NO_HELMET", pid, f"helmet={helmet}", frame)
                 if vest != "OK" and should_log(pid, "NO_VEST"):
