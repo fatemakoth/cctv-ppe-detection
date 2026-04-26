@@ -175,10 +175,12 @@ class PPESmoother:
         now = time.time()
         if tid not in self.tracks:
             self.tracks[tid] = {
-                "helmet":    deque(maxlen=SMOOTH_FRAMES),
-                "vest":      deque(maxlen=SMOOTH_FRAMES),
-                "off_floor": deque(maxlen=SMOOTH_FRAMES),
-                "off_since": None,
+                "helmet":       deque(maxlen=SMOOTH_FRAMES),
+                "vest":         deque(maxlen=SMOOTH_FRAMES),
+                "off_floor":    deque(maxlen=SMOOTH_FRAMES),
+                "off_since":    None,
+                "prev_helmet":  None,
+                "prev_vest":    None,
             }
         t = self.tracks[tid]
         t["helmet"].append(helmet)
@@ -194,7 +196,16 @@ class PPESmoother:
             t["off_since"] = None
             sustained = False
 
-        return _vote(t["helmet"]), _vote(t["vest"]), sustained
+        s_helmet = _vote(t["helmet"])
+        s_vest   = _vote(t["vest"])
+
+        # Detect removal: previously confirmed OK, now confirmed MISSING
+        h_removed = t["prev_helmet"] == "OK" and s_helmet == "MISSING"
+        v_removed = t["prev_vest"]   == "OK" and s_vest   == "MISSING"
+        t["prev_helmet"] = s_helmet
+        t["prev_vest"]   = s_vest
+
+        return s_helmet, s_vest, sustained, h_removed, v_removed
 
     def cleanup(self, active_ids):
         for k in [k for k in self.tracks if k not in active_ids]:
@@ -424,32 +435,41 @@ def run(source):
                 vest   = check_vest(frame, pbox, ppe_model, ppe_names, h, rear)
             off_floor, _ = check_feet(pbox, kps)
 
-            s_helmet, s_vest, sustained = smoother.update(tid, helmet, vest, off_floor)
+            s_helmet, s_vest, sustained, h_removed, v_removed = smoother.update(tid, helmet, vest, off_floor)
             active_ids.add(tid)
-            results.append((tid, pbox, s_helmet, s_vest, sustained, kps))
+            results.append((tid, pbox, s_helmet, s_vest, sustained, kps, h_removed, v_removed))
 
         smoother.cleanup(active_ids)
 
         ppe_violations = 0
         feet_alerts    = 0
 
-        for tid, box, helmet, vest, off_floor, kps in results:
+        for tid, box, helmet, vest, off_floor, kps, h_removed, v_removed in results:
             pid = tid
             draw_person(frame, box, helmet, vest, off_floor, kps, pid)
 
             if off_floor:
                 feet_alerts += 1
-                if helmet != "OK" or vest != "OK":
-                    ppe_violations += 1   # PPE violation only counts when elevated
+            if helmet == "MISSING" or vest == "MISSING":
+                ppe_violations += 1
 
             # ── Incident logging ──────────────────────────────────────────────
             if off_floor and should_log(pid, "FEET_OFF_FLOOR"):
                 logger.log(source, "FEET_OFF_FLOOR", pid, "feet not on floor", frame)
-            if off_floor and helmet != "UNVERIFIABLE" and vest != "UNVERIFIABLE":
-                if helmet != "OK" and should_log(pid, "NO_HELMET"):
-                    logger.log(source, "NO_HELMET", pid, f"helmet={helmet}", frame)
-                if vest != "OK" and should_log(pid, "NO_VEST"):
-                    logger.log(source, "NO_VEST", pid, f"vest={vest}", frame)
+
+            # PPE violations logged regardless of floor position
+            if helmet not in ("OK", "UNVERIFIABLE") and should_log(pid, "NO_HELMET"):
+                logger.log(source, "NO_HELMET", pid, "helmet missing", frame)
+            if vest not in ("OK", "UNVERIFIABLE") and should_log(pid, "NO_VEST"):
+                logger.log(source, "NO_VEST", pid, "vest missing", frame)
+
+            # State transitions logged immediately — bypass cooldown
+            if h_removed:
+                last_logged[f"P{pid}_NO_HELMET"] = 0  # reset so next check logs it
+                logger.log(source, "PPE_REMOVED", pid, "helmet removed mid-session", frame)
+            if v_removed:
+                last_logged[f"P{pid}_NO_VEST"] = 0
+                logger.log(source, "PPE_REMOVED", pid, "vest removed mid-session", frame)
 
         # Banners
         banner_y = 0
