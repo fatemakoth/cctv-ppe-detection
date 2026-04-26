@@ -15,6 +15,7 @@ If credentials.json is missing, incidents are printed to console only (no crash)
 """
 
 import os
+import shutil
 import cv2
 from datetime import datetime
 
@@ -22,6 +23,10 @@ CREDENTIALS_FILE = "credentials.json"
 SHEET_NAME       = "PPE Incidents"
 SNAPSHOT_DIR     = "snapshots"
 HEADERS          = ["Timestamp", "Camera Source", "Violation", "Person ID", "Detail", "Snapshot Path"]
+
+MAX_SNAPSHOTS  = 500    # oldest files are deleted once this count is exceeded
+MIN_FREE_GB    = 0.5    # stop saving snapshots if free disk space drops below this
+JPEG_QUALITY   = 70     # good enough for incident review, ~3-4x smaller than default
 
 
 class SheetsLogger:
@@ -74,7 +79,13 @@ class SheetsLogger:
         ts        = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         fname     = datetime.now().strftime("%Y%m%d_%H%M%S") + f"_P{person_id}_{violation}.jpg"
         snap_path = os.path.join(self.snapshot_dir, fname)
-        cv2.imwrite(snap_path, frame)
+
+        if self._has_free_space():
+            cv2.imwrite(snap_path, frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+            self._prune_snapshots()
+        else:
+            snap_path = "SKIPPED_NO_SPACE"
+            print(f"[WARN] Disk space below {MIN_FREE_GB}GB — snapshot skipped")
 
         row = [ts, str(source), violation, str(person_id), detail, snap_path]
 
@@ -85,6 +96,18 @@ class SheetsLogger:
                 print(f"[WARN] Sheet append failed: {e}")
 
         print(f"[INCIDENT] {ts} | {violation} | P{person_id} | {detail}")
+
+    def _has_free_space(self):
+        free_bytes = shutil.disk_usage(self.snapshot_dir).free
+        return free_bytes >= MIN_FREE_GB * 1024 ** 3
+
+    def _prune_snapshots(self):
+        files = sorted(
+            (f for f in os.scandir(self.snapshot_dir) if f.name.endswith(".jpg")),
+            key=lambda f: f.stat().st_mtime
+        )
+        while len(files) > MAX_SNAPSHOTS:
+            os.remove(files.pop(0).path)
 
     def close(self):
         pass
