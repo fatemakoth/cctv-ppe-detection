@@ -22,10 +22,11 @@ VEST_NO_CONF   = 0.30
 MIN_BOX_HEIGHT = 80
 MIN_ASPECT     = 0.6
 
-SMOOTH_FRAMES  = 8
-MISSING_THRESH = 3
-OK_THRESH      = 5
-IOU_MATCH      = 0.25
+SMOOTH_FRAMES     = 8
+MISSING_THRESH    = 3
+OK_THRESH         = 5
+IOU_MATCH         = 0.25
+FEET_MIN_DURATION = 5.0  # seconds feet must be continuously off floor before flagging
 
 FOOT_CONF_MIN     = 0.40
 ANKLE_BOX_THRESH  = 0.07
@@ -58,9 +59,10 @@ def region_crop(frame, pbox, top_f, bot_f, fh):
 
 # ── PersonTracker ─────────────────────────────────────────────────────────────
 class PersonTracker:
-    def __init__(self):
+    def __init__(self, fps=25):
         self.tracks = {}
         self._next  = 0
+        self._fps   = max(fps, 1)
 
     def update(self, detections):
         matched = set()
@@ -75,19 +77,27 @@ class PersonTracker:
                 best_id = self._next
                 self._next += 1
                 self.tracks[best_id] = {
-                    "box":    box,
-                    "helmet": deque(maxlen=SMOOTH_FRAMES),
-                    "vest":   deque(maxlen=SMOOTH_FRAMES),
-                    "off":    deque(maxlen=SMOOTH_FRAMES),
+                    "box":        box,
+                    "helmet":     deque(maxlen=SMOOTH_FRAMES),
+                    "vest":       deque(maxlen=SMOOTH_FRAMES),
+                    "off":        deque(maxlen=SMOOTH_FRAMES),
+                    "off_streak": 0,
                 }
             t = self.tracks[best_id]
             t["box"] = box
             t["helmet"].append(h)
             t["vest"].append(v)
             t["off"].append(off)
+
+            raw_off = _vote_off(t["off"])
+            if raw_off:
+                t["off_streak"] += 1
+            else:
+                t["off_streak"] = 0
+            sustained = (t["off_streak"] / self._fps) >= FEET_MIN_DURATION
+
             matched.add(best_id)
-            results.append((box, _vote_ppe(t["helmet"]), _vote_ppe(t["vest"]),
-                            _vote_off(t["off"])))
+            results.append((box, _vote_ppe(t["helmet"]), _vote_ppe(t["vest"]), sustained))
         self.tracks = {k: v for k, v in self.tracks.items() if k in matched}
         return results
 
@@ -179,7 +189,7 @@ def run(video_path, show, skip_frames):
     ppe_names  = ppe_model.names
 
     logger  = SheetsLogger()
-    tracker = PersonTracker()
+    tracker = PersonTracker(fps=fps)
 
     cap         = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))

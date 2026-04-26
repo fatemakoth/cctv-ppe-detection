@@ -50,6 +50,7 @@ ANKLE_BOX_THRESH  = 0.07  # ankle > 7% of box height above box bottom → feet o
 FLOOR_MAP_THRESH  = 0.14  # ankle > 14% of box height above mapped floor → feet off floor
 FLOOR_DEPTH_RADIUS = 80   # max pixel distance in y to nearest calibration point — if farther, skip floor-map check
 OFF_FLOOR_THRESH   = 5    # frames out of SMOOTH_FRAMES needed to declare off-floor (sustained elevation only)
+FEET_MIN_DURATION  = 5.0  # seconds feet must be continuously off floor before flagging
 FOOT_CONF_MIN     = 0.40
 MIN_ANKLES        = 1
 
@@ -180,6 +181,7 @@ class PersonTracker:
         """detections: list of (box, helmet, vest, off_floor, kps)"""
         matched = set()
         results = []
+        now = time.time()
         for box, h, v, off, kps in detections:
             best_id, best_s = None, IOU_MATCH
             for tid, t in self.tracks.items():
@@ -192,15 +194,25 @@ class PersonTracker:
                 self.tracks[best_id] = {"box":       box,
                                         "helmet":    deque(maxlen=SMOOTH_FRAMES),
                                         "vest":      deque(maxlen=SMOOTH_FRAMES),
-                                        "off_floor": deque(maxlen=SMOOTH_FRAMES)}
+                                        "off_floor": deque(maxlen=SMOOTH_FRAMES),
+                                        "off_since": None}
             t = self.tracks[best_id]
             t["box"] = box
             t["helmet"].append(h)
             t["vest"].append(v)
             t["off_floor"].append(off)
             matched.add(best_id)
-            results.append((box, _vote(t["helmet"]), _vote(t["vest"]),
-                            _vote_bool(t["off_floor"]), kps))
+
+            raw_off = _vote_bool(t["off_floor"])
+            if raw_off:
+                if t["off_since"] is None:
+                    t["off_since"] = now
+                sustained = (now - t["off_since"]) >= FEET_MIN_DURATION
+            else:
+                t["off_since"] = None
+                sustained = False
+
+            results.append((box, _vote(t["helmet"]), _vote(t["vest"]), sustained, kps))
         self.tracks = {k: v for k, v in self.tracks.items() if k in matched}
         return results
 
