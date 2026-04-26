@@ -112,23 +112,46 @@ def draw_floor_map(frame, floor_points):
 
 
 # ── threaded RTSP reader ───────────────────────────────────────────────────────
+# Reconnect delays (seconds) — increases with each failed attempt, caps at last value
+RECONNECT_DELAYS = [2, 5, 10, 30]
+RECONNECT_FAIL_THRESHOLD = 10  # consecutive bad reads before triggering reconnect
 
 class FrameReader:
     def __init__(self, source):
-        self.cap   = _open_cap(source)
-        self.ret   = False
-        self.frame = None
-        self._lock = threading.Lock()
-        self._stop = False
+        self.source = source
+        self.cap    = _open_cap(source)
+        self.ret    = False
+        self.frame  = None
+        self._lock  = threading.Lock()
+        self._stop  = False
         threading.Thread(target=self._loop, daemon=True).start()
 
     def _loop(self):
+        fail_streak   = 0
+        retry_attempt = 0
         while not self._stop:
             ret, frame = self.cap.read()
-            with self._lock:
-                self.ret, self.frame = ret, frame
-            if not ret:
-                time.sleep(0.05)
+            if ret:
+                fail_streak   = 0
+                retry_attempt = 0
+                with self._lock:
+                    self.ret, self.frame = True, frame
+            else:
+                fail_streak += 1
+                if fail_streak >= RECONNECT_FAIL_THRESHOLD:
+                    delay = RECONNECT_DELAYS[min(retry_attempt, len(RECONNECT_DELAYS) - 1)]
+                    print(f"\n[WARN] Stream lost. Reconnecting in {delay}s "
+                          f"(attempt {retry_attempt + 1})...")
+                    time.sleep(delay)
+                    self.cap.release()
+                    self.cap = _open_cap(self.source)
+                    fail_streak    = 0
+                    retry_attempt += 1
+                    if self.cap.isOpened():
+                        print("[INFO] Stream reconnected.")
+                        retry_attempt = 0
+                else:
+                    time.sleep(0.05)
 
     def read(self):
         with self._lock:
