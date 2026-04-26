@@ -159,14 +159,15 @@ def run(video_path, show, skip_frames):
     ppe_model  = YOLO(PPE_MODEL_PATH)
     ppe_names  = ppe_model.names
 
-    logger  = SheetsLogger()
-    tracker = PersonTracker(fps=fps)
+    logger = SheetsLogger()
 
-    cap         = cv2.VideoCapture(video_path)
+    cap          = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps          = cap.get(cv2.CAP_PROP_FPS) or 25
     W            = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     H            = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    tracker    = PersonTracker(fps=fps)
 
     video_name = os.path.splitext(os.path.basename(video_path))[0]
     out_path   = os.path.join(OUTPUT_DIR, f"{video_name}_checked.mp4")
