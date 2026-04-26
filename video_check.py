@@ -2,18 +2,16 @@ import cv2
 import json
 import argparse
 import os
-import sqlite3
 import time
 import numpy as np
 from collections import deque
 from datetime import datetime
 from ultralytics import YOLO
+from sheets_logger import SheetsLogger
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 POSE_MODEL     = "yolov8n-pose.pt"
 PPE_MODEL_PATH = "ppe_model/ppe_best.pt"
-DB_FILE        = "incidents.db"
-SNAPSHOT_DIR   = "snapshots"
 OUTPUT_DIR     = "checked_videos"
 
 PERSON_CONF    = 0.50
@@ -41,35 +39,6 @@ HAS_HELMET, NO_HELMET = "Hardhat",     "NO-Hardhat"
 HAS_VEST,   NO_VEST   = "Safety Vest", "NO-Safety Vest"
 PPE_CLASSES           = {HAS_HELMET, NO_HELMET, HAS_VEST, NO_VEST}
 
-# ── Database ──────────────────────────────────────────────────────────────────
-def init_db():
-    os.makedirs(SNAPSHOT_DIR, exist_ok=True)
-    con = sqlite3.connect(DB_FILE)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS incidents (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp     TEXT    NOT NULL,
-            camera_source TEXT    NOT NULL,
-            violation     TEXT    NOT NULL,
-            person_id     INTEGER,
-            detail        TEXT,
-            snapshot_path TEXT
-        )
-    """)
-    con.commit()
-    return con
-
-def log_incident(con, source, violation, person_id, detail, frame):
-    ts        = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    fname     = datetime.now().strftime("%Y%m%d_%H%M%S") + f"_P{person_id}_{violation}.jpg"
-    snap_path = os.path.join(SNAPSHOT_DIR, fname)
-    cv2.imwrite(snap_path, frame)
-    con.execute(
-        "INSERT INTO incidents (timestamp,camera_source,violation,person_id,detail,snapshot_path) "
-        "VALUES (?,?,?,?,?,?)",
-        (ts, str(source), violation, person_id, detail, snap_path)
-    )
-    con.commit()
 
 # ── Geometry ──────────────────────────────────────────────────────────────────
 def iou(a, b):
@@ -209,7 +178,7 @@ def run(video_path, show, skip_frames):
     ppe_model  = YOLO(PPE_MODEL_PATH)
     ppe_names  = ppe_model.names
 
-    con     = init_db()
+    logger  = SheetsLogger()
     tracker = PersonTracker()
 
     cap         = cv2.VideoCapture(video_path)
@@ -294,14 +263,14 @@ def run(video_path, show, skip_frames):
                 frame_has_violation = True
                 if should_log(pid, "PPE"):
                     total_ppe_events += 1
-                    log_incident(con, video_path, "PPE_VIOLATION", pid,
-                                 f"helmet={helmet} vest={vest}", frame)
+                    logger.log(video_path, "PPE_VIOLATION", pid,
+                               f"helmet={helmet} vest={vest}", frame)
             if off_floor:
                 frame_has_violation = True
                 if should_log(pid, "FEET"):
                     total_feet_events += 1
-                    log_incident(con, video_path, "FEET_OFF_FLOOR", pid,
-                                 "feet not on floor", frame)
+                    logger.log(video_path, "FEET_OFF_FLOOR", pid,
+                               "feet not on floor", frame)
 
         if frame_has_violation:
             violation_frames += 1
@@ -325,7 +294,7 @@ def run(video_path, show, skip_frames):
     print()
     cap.release()
     writer.release()
-    con.close()
+    logger.close()
     cv2.destroyAllWindows()
 
     elapsed = time.time() - start_t
@@ -339,8 +308,7 @@ def run(video_path, show, skip_frames):
     print(f"  PPE incidents     : {total_ppe_events}")
     print(f"  Feet-off-floor    : {total_feet_events}")
     print(f"  Annotated video   : {out_path}")
-    print(f"  Snapshots         : {SNAPSHOT_DIR}/")
-    print(f"  Incident log      : {DB_FILE}")
+    print(f"  Snapshots         : snapshots/")
     print("="*55)
 
 if __name__ == "__main__":

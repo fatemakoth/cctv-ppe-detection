@@ -19,6 +19,9 @@ ppe_model/valid/
 ppe_model/test/
 ppe_model/ppe_train/
 
+# Google Sheets credentials (never commit this)
+credentials.json
+
 # Python
 __pycache__/
 *.pyc

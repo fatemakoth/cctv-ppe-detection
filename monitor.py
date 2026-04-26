@@ -15,48 +15,16 @@ import cv2
 import json
 import argparse
 import os
-import sqlite3
 import threading
 import time
 import numpy as np
 from collections import deque
 from datetime import datetime
 from ultralytics import YOLO
+from sheets_logger import SheetsLogger
 
 # ── Incident logging ───────────────────────────────────────────────────────────
-DB_FILE          = "incidents.db"
-SNAPSHOT_DIR     = "snapshots"
-COOLDOWN_SEC     = 15   # log same violation at most once per N seconds per person
-
-def init_db():
-    os.makedirs(SNAPSHOT_DIR, exist_ok=True)
-    con = sqlite3.connect(DB_FILE, check_same_thread=False)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS incidents (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp     TEXT    NOT NULL,
-            camera_source TEXT    NOT NULL,
-            violation     TEXT    NOT NULL,
-            person_id     INTEGER,
-            detail        TEXT,
-            snapshot_path TEXT
-        )
-    """)
-    con.commit()
-    return con
-
-def log_incident(con, source, violation, person_id, detail, frame):
-    ts        = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    fname     = datetime.now().strftime("%Y%m%d_%H%M%S") + f"_P{person_id}_{violation}.jpg"
-    snap_path = os.path.join(SNAPSHOT_DIR, fname)
-    cv2.imwrite(snap_path, frame)
-    con.execute(
-        "INSERT INTO incidents (timestamp,camera_source,violation,person_id,detail,snapshot_path) "
-        "VALUES (?,?,?,?,?,?)",
-        (ts, str(source), violation, person_id, detail, snap_path)
-    )
-    con.commit()
-    print(f"[INCIDENT] {ts} | {violation} | P{person_id} | {detail}")
+COOLDOWN_SEC = 15   # log same violation at most once per N seconds per person
 
 # ── config ─────────────────────────────────────────────────────────────────────
 
@@ -393,8 +361,7 @@ def run(source):
     print(f"[INFO] Floor map: {'YES (' + str(len(floor_points)) + ' points)' if floor_points else 'NO — run calibrate.py to enable'}")
     print("[INFO] Press 'q' to quit.\n")
 
-    con     = init_db()
-    print(f"[INFO] Logging incidents to: {DB_FILE}  |  Snapshots: {SNAPSHOT_DIR}/")
+    logger  = SheetsLogger()
 
     cap = FrameReader(source)
     w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -459,12 +426,12 @@ def run(source):
 
             # ── Incident logging ──────────────────────────────────────────────
             if off_floor and should_log(pid, "FEET_OFF_FLOOR"):
-                log_incident(con, source, "FEET_OFF_FLOOR", pid, "feet not on floor", frame)
+                logger.log(source, "FEET_OFF_FLOOR", pid, "feet not on floor", frame)
             if off_floor:   # PPE incidents only logged when elevated
                 if helmet != "OK" and should_log(pid, "NO_HELMET"):
-                    log_incident(con, source, "NO_HELMET", pid, f"helmet={helmet}", frame)
+                    logger.log(source, "NO_HELMET", pid, f"helmet={helmet}", frame)
                 if vest != "OK" and should_log(pid, "NO_VEST"):
-                    log_incident(con, source, "NO_VEST", pid, f"vest={vest}", frame)
+                    logger.log(source, "NO_VEST", pid, f"vest={vest}", frame)
 
         # Banners
         banner_y = 0
@@ -488,9 +455,9 @@ def run(source):
             break
 
     cap.release()
-    con.close()
+    logger.close()
     cv2.destroyAllWindows()
-    print(f"[INFO] Stopped. Incidents saved to {DB_FILE}")
+    print("[INFO] Stopped.")
 
 
 if __name__ == "__main__":
