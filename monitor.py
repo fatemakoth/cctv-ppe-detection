@@ -1,16 +1,3 @@
-"""
-Unified safety monitor — PPE detection + feet-off-floor detection.
-
-Models:
-  yolov8n-pose.pt       person detection + ankle keypoints
-  ppe_model/ppe_best.pt PPE detection on head/torso crops
-
-Floor detection works in two modes:
-  - Without calibration: relative ankle check only (perspective-invariant)
-  - With calibration (floor_points):  relative check + floor-map check
-    (catches standing on chairs/platforms too)
-"""
-
 import cv2
 import argparse
 import os
@@ -20,64 +7,9 @@ from collections import deque
 from datetime import datetime
 from ultralytics import YOLO
 from sheets_logger import SheetsLogger
-
-# ── Incident logging ───────────────────────────────────────────────────────────
-COOLDOWN_SEC = 15   # log same violation at most once per N seconds per person
-
-# ── config ─────────────────────────────────────────────────────────────────────
-
-POSE_MODEL     = "yolov8n-pose.pt"
-PPE_MODEL_PATH = "ppe_model/ppe_best.pt"
-
-PERSON_CONF    = 0.50
-HELMET_OK_CONF      = 0.70
-HELMET_NO_CONF      = 0.30
-HELMET_NO_CONF_REAR = 0.55  # stricter — need more confidence to declare missing from behind
-VEST_OK_CONF        = 0.65
-VEST_NO_CONF        = 0.30
-VEST_NO_CONF_REAR   = 0.50
-
-# Rear-facing detection via nose keypoint
-NOSE_KP       = 0
-REAR_CONF_MIN = 0.30   # nose confidence below this → person likely facing away
-
-MIN_BOX_HEIGHT = 80
-MIN_ASPECT     = 0.6
-
-SMOOTH_FRAMES  = 10
-MISSING_THRESH = 4
-OK_THRESH      = 6
-MERGE_IOU_THRESH = 0.60  # boxes overlapping more than this are considered duplicates
-
-# Feet-off-floor thresholds
-ANKLE_BOX_THRESH  = 0.07  # ankle > 7% of box height above box bottom → feet off floor
-OFF_FLOOR_THRESH  = 5     # frames out of SMOOTH_FRAMES needed to declare off-floor (sustained elevation only)
-FEET_MIN_DURATION  = 5.0  # seconds feet must be continuously off floor before flagging
-FOOT_CONF_MIN     = 0.40
-MIN_ANKLES        = 1
-
-LEFT_ANKLE  = 15
-RIGHT_ANKLE = 16
-
-# Occlusion detection
-LEFT_SHOULDER     = 5
-RIGHT_SHOULDER    = 6
-SHOULDER_CONF_MIN = 0.40
-EDGE_MARGIN       = 10   # px from frame edge — box touching this is considered clipped
-
-# PPE crop regions (fraction of person box height)
-HEAD_TOP  = 0.0;  HEAD_BOT  = 0.30
-TORSO_TOP = 0.15; TORSO_BOT = 0.70
-
-HAS_HELMET = "Hardhat";   NO_HELMET = "NO-Hardhat"
-HAS_VEST   = "Safety Vest"; NO_VEST = "NO-Safety Vest"
-
-
+from config import *
 
 # ── threaded RTSP reader ───────────────────────────────────────────────────────
-# Reconnect delays (seconds) — increases with each failed attempt, caps at last value
-RECONNECT_DELAYS = [2, 5, 10, 30]
-RECONNECT_FAIL_THRESHOLD = 10  # consecutive bad reads before triggering reconnect
 
 class FrameReader:
     def __init__(self, source):

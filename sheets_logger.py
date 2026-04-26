@@ -18,15 +18,10 @@ import os
 import shutil
 import cv2
 from datetime import datetime
+from config import (CREDENTIALS_FILE, SHEET_NAME, SNAPSHOT_DIR,
+                    MAX_SNAPSHOTS, MIN_FREE_GB, JPEG_QUALITY)
 
-CREDENTIALS_FILE = "credentials.json"
-SHEET_NAME       = "PPE Incidents"
-SNAPSHOT_DIR     = "snapshots"
-HEADERS          = ["Timestamp", "Camera Source", "Violation", "Person ID", "Detail", "Snapshot Path"]
-
-MAX_SNAPSHOTS  = 500    # oldest files are deleted once this count is exceeded
-MIN_FREE_GB    = 0.5    # stop saving snapshots if free disk space drops below this
-JPEG_QUALITY   = 70     # good enough for incident review, ~3-4x smaller than default
+HEADERS = ["Timestamp", "Camera Source", "Violation", "Person ID", "Detail", "Snapshot Path"]
 
 
 class SheetsLogger:

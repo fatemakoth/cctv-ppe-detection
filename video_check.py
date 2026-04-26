@@ -1,5 +1,4 @@
 import cv2
-import json
 import argparse
 import os
 import time
@@ -8,37 +7,9 @@ from collections import deque
 from datetime import datetime
 from ultralytics import YOLO
 from sheets_logger import SheetsLogger
+from config import *
 
-# ── Config ─────────────────────────────────────────────────────────────────────
-POSE_MODEL     = "yolov8n-pose.pt"
-PPE_MODEL_PATH = "ppe_model/ppe_best.pt"
-OUTPUT_DIR     = "checked_videos"
-
-PERSON_CONF    = 0.50
-HELMET_OK_CONF = 0.70
-HELMET_NO_CONF = 0.30
-VEST_OK_CONF   = 0.65
-VEST_NO_CONF   = 0.30
-MIN_BOX_HEIGHT = 80
-MIN_ASPECT     = 0.6
-
-SMOOTH_FRAMES     = 8
-MISSING_THRESH    = 3
-OK_THRESH         = 5
-IOU_MATCH         = 0.25
-FEET_MIN_DURATION = 5.0  # seconds feet must be continuously off floor before flagging
-
-FOOT_CONF_MIN     = 0.40
-ANKLE_BOX_THRESH  = 0.07
-LEFT_ANKLE        = 15
-RIGHT_ANKLE       = 16
-
-HEAD_TOP, HEAD_BOT   = 0.0, 0.30
-TORSO_TOP, TORSO_BOT = 0.15, 0.70
-
-HAS_HELMET, NO_HELMET = "Hardhat",     "NO-Hardhat"
-HAS_VEST,   NO_VEST   = "Safety Vest", "NO-Safety Vest"
-PPE_CLASSES           = {HAS_HELMET, NO_HELMET, HAS_VEST, NO_VEST}
+PPE_CLASSES = {HAS_HELMET, NO_HELMET, HAS_VEST, NO_VEST}
 
 
 # ── Geometry ──────────────────────────────────────────────────────────────────
