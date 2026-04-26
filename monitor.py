@@ -218,7 +218,7 @@ def is_rear_facing(kps):
 def check_helmet(frame, pbox, ppe_model, ppe_names, frame_h, rear_facing=False):
     crop = region_crop(frame, pbox, HEAD_TOP, HEAD_BOT, frame_h)
     if crop is None:
-        return "OK" if rear_facing else "MISSING"
+        return "MISSING"
     best_yes = best_no = 0.0
     for box in ppe_model(crop, verbose=False, conf=HELMET_NO_CONF)[0].boxes:
         cls = ppe_names[int(box.cls)]; conf = float(box.conf)
@@ -227,12 +227,12 @@ def check_helmet(frame, pbox, ppe_model, ppe_names, frame_h, rear_facing=False):
     if best_yes >= HELMET_OK_CONF: return "OK"
     no_thresh = HELMET_NO_CONF_REAR if rear_facing else HELMET_NO_CONF
     if best_no >= no_thresh:       return "MISSING"
-    return "OK" if rear_facing else "MISSING"
+    return "MISSING"
 
 def check_vest(frame, pbox, ppe_model, ppe_names, frame_h, rear_facing=False):
     crop = region_crop(frame, pbox, TORSO_TOP, TORSO_BOT, frame_h)
     if crop is None:
-        return "OK" if rear_facing else "MISSING"
+        return "MISSING"
     best_yes = best_no = 0.0
     for box in ppe_model(crop, verbose=False, conf=VEST_NO_CONF)[0].boxes:
         cls = ppe_names[int(box.cls)]; conf = float(box.conf)
@@ -241,7 +241,7 @@ def check_vest(frame, pbox, ppe_model, ppe_names, frame_h, rear_facing=False):
     if best_yes >= VEST_OK_CONF: return "OK"
     no_thresh = VEST_NO_CONF_REAR if rear_facing else VEST_NO_CONF
     if best_no >= no_thresh:     return "MISSING"
-    return "OK" if rear_facing else "MISSING"
+    return "MISSING"
 
 
 # ── feet-off-floor detection ───────────────────────────────────────────────────
