@@ -12,12 +12,10 @@ Floor detection works in two modes:
 """
 
 import cv2
-import json
 import argparse
 import os
 import threading
 import time
-import numpy as np
 from collections import deque
 from datetime import datetime
 from ultralytics import YOLO
@@ -47,9 +45,7 @@ IOU_MATCH      = 0.25
 
 # Feet-off-floor thresholds
 ANKLE_BOX_THRESH  = 0.07  # ankle > 7% of box height above box bottom → feet off floor
-FLOOR_MAP_THRESH  = 0.14  # ankle > 14% of box height above mapped floor → feet off floor
-FLOOR_DEPTH_RADIUS = 80   # max pixel distance in y to nearest calibration point — if farther, skip floor-map check
-OFF_FLOOR_THRESH   = 5    # frames out of SMOOTH_FRAMES needed to declare off-floor (sustained elevation only)
+OFF_FLOOR_THRESH  = 5     # frames out of SMOOTH_FRAMES needed to declare off-floor (sustained elevation only)
 FEET_MIN_DURATION  = 5.0  # seconds feet must be continuously off floor before flagging
 FOOT_CONF_MIN     = 0.40
 MIN_ANKLES        = 1
@@ -64,51 +60,6 @@ TORSO_TOP = 0.15; TORSO_BOT = 0.70
 HAS_HELMET = "Hardhat";   NO_HELMET = "NO-Hardhat"
 HAS_VEST   = "Safety Vest"; NO_VEST = "NO-Safety Vest"
 
-
-# ── calibration / floor map ────────────────────────────────────────────────────
-
-def load_calibration():
-    try:
-        with open("calibration.json") as f:
-            data = json.load(f)
-        pts = data.get("floor_points", [])
-        if pts:
-            print(f"[INFO] Floor map loaded: {len(pts)} points")
-        else:
-            print("[WARN] calibration.json has no floor_points — floor-map check disabled.")
-        return data
-    except FileNotFoundError:
-        print("[INFO] No calibration.json — using relative ankle check only.")
-        return None
-
-def floor_y_at(ankle_x, person_y2, floor_points):
-    """
-    Return expected floor y at the person's depth, or None if no calibration coverage.
-
-    Uses Gaussian weighting by both y-distance (depth) and x-distance.
-    Returns None when the nearest calibration point in y is farther than
-    FLOOR_DEPTH_RADIUS — this prevents false positives in uncalibrated areas.
-    """
-    if not floor_points or len(floor_points) < 2:
-        return None
-    pts = np.array(floor_points, dtype=float)
-    dy  = np.abs(pts[:, 1] - person_y2)
-
-    # No calibration data near this depth → skip floor-map check entirely
-    if np.min(dy) > FLOOR_DEPTH_RADIUS:
-        return None
-
-    dx      = np.abs(pts[:, 0] - ankle_x)
-    weights = np.exp(-(dy / 80) ** 2) * np.exp(-(dx / 400) ** 2)
-    total_w = np.sum(weights)
-    if total_w < 1e-6:
-        return None
-    return float(np.dot(weights, pts[:, 1]) / total_w)
-
-def draw_floor_map(frame, floor_points):
-    """Draw calibration dots only — no regression line (line was misleading)."""
-    for px, py in floor_points:
-        cv2.circle(frame, (int(px), int(py)), 4, (0, 200, 0), -1)
 
 
 # ── threaded RTSP reader ───────────────────────────────────────────────────────
@@ -282,19 +233,11 @@ def check_vest(frame, pbox, ppe_model, ppe_names, frame_h):
 
 # ── feet-off-floor detection ───────────────────────────────────────────────────
 
-def check_feet(box, kps, floor_points):
+def check_feet(box, kps):
     """
-    Returns: (off_floor: bool, ankle_rel: float|None)
-
-    Check 1 — Floor map (if calibrated):
-      Compare ankle pixel position to the interpolated floor surface at that x.
-      Normalized by box height → distance-invariant.
-      Catches: standing on chair, platform, machinery.
-
-    Check 2 — Relative to bounding box bottom (always runs):
-      ankle_rel = (box_bottom - ankle_y) / box_height
-      ≈ 0 when standing, > ANKLE_BOX_THRESH when feet are dangling/raised.
-      Catches: sitting with feet up, climbing, hanging.
+    Returns (off_floor: bool, ankle_rel: float|None).
+    Compares ankle y-position to the bounding box bottom — no calibration needed.
+    ankle_rel ≈ 0 when standing, > ANKLE_BOX_THRESH when feet are raised/dangling.
     """
     x1, y1, x2, y2 = box
     box_h = max(y2 - y1, 1)
@@ -302,35 +245,19 @@ def check_feet(box, kps, floor_points):
     if kps is None or kps.data is None or len(kps.data) == 0:
         return False, None
 
-    kp_data  = kps.data[0]
-    ankle_xs, ankle_ys = [], []
+    kp_data   = kps.data[0]
+    ankle_ys  = []
     for idx in [LEFT_ANKLE, RIGHT_ANKLE]:
         kp = kp_data[idx]
         if float(kp[2]) >= FOOT_CONF_MIN:
-            ankle_xs.append(float(kp[0]))
             ankle_ys.append(float(kp[1]))
 
     if len(ankle_ys) < MIN_ANKLES:
         return False, None
 
-    avg_ax = sum(ankle_xs) / len(ankle_xs)
-    avg_ay = sum(ankle_ys) / len(ankle_ys)
-
-    # ── Check 1: floor map ────────────────────────────────────────────────────
-    if floor_points and len(floor_points) >= 2:
-        expected_floor_y = floor_y_at(avg_ax, y2, floor_points)
-        if expected_floor_y is not None:
-            above_floor = (expected_floor_y - avg_ay) / box_h
-            if above_floor > FLOOR_MAP_THRESH:
-                ankle_rel = (y2 - avg_ay) / box_h
-                return True, ankle_rel
-
-    # ── Check 2: relative to box bottom ──────────────────────────────────────
+    avg_ay    = sum(ankle_ys) / len(ankle_ys)
     ankle_rel = (y2 - avg_ay) / box_h
-    if ankle_rel > ANKLE_BOX_THRESH:
-        return True, ankle_rel
-
-    return False, ankle_rel
+    return ankle_rel > ANKLE_BOX_THRESH, ankle_rel
 
 
 # ── drawing ────────────────────────────────────────────────────────────────────
@@ -386,14 +313,10 @@ def draw_person(frame, box, helmet, vest, off_floor, kps, pid):
 # ── main loop ──────────────────────────────────────────────────────────────────
 
 def run(source):
-    cal          = load_calibration()
-    floor_points = cal.get("floor_points", []) if cal else []
-
     print("[INFO] Loading models...")
     pose_model = YOLO(POSE_MODEL)
     ppe_model  = YOLO(PPE_MODEL_PATH)
     ppe_names  = ppe_model.names
-    print(f"[INFO] Floor map: {'YES (' + str(len(floor_points)) + ' points)' if floor_points else 'NO — run calibrate.py to enable'}")
     print("[INFO] Press 'q' to quit.\n")
 
     logger  = SheetsLogger()
@@ -420,10 +343,6 @@ def run(source):
             time.sleep(0.01)
             continue
 
-        # Draw calibrated floor line (subtle, for reference)
-        if floor_points:
-            draw_floor_map(frame, floor_points)
-
         pose_res = pose_model(frame, verbose=False, conf=PERSON_CONF)[0]
 
         raw_detections = []
@@ -443,7 +362,7 @@ def run(source):
 
             helmet    = check_helmet(frame, pbox, ppe_model, ppe_names, h)
             vest      = check_vest(frame, pbox, ppe_model, ppe_names, h)
-            off_floor, _ = check_feet(pbox, kps, floor_points)
+            off_floor, _ = check_feet(pbox, kps)
             raw_detections.append((pbox, helmet, vest, off_floor, kps))
 
         smoothed     = tracker.update(raw_detections)
