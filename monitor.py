@@ -47,7 +47,7 @@ MIN_ASPECT     = 0.6
 SMOOTH_FRAMES  = 10
 MISSING_THRESH = 4
 OK_THRESH      = 6
-IOU_MATCH      = 0.25
+MERGE_IOU_THRESH = 0.60  # boxes overlapping more than this are considered duplicates
 
 # Feet-off-floor thresholds
 ANKLE_BOX_THRESH  = 0.07  # ankle > 7% of box height above box bottom → feet off floor
@@ -141,6 +141,14 @@ def iou(a, b):
         return 0.0
     return inter / ((a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - inter)
 
+def suppress_merged_boxes(candidates):
+    """Keep only the highest-confidence detection when two boxes overlap heavily."""
+    kept = []
+    for cand in sorted(candidates, key=lambda c: c[0], reverse=True):
+        if all(iou(cand[2], k[2]) < MERGE_IOU_THRESH for k in kept):
+            kept.append(cand)
+    return kept
+
 def region_crop(frame, pbox, top_frac, bot_frac, frame_h):
     x1, y1, x2, y2 = pbox
     ph  = y2 - y1
@@ -152,49 +160,39 @@ def region_crop(frame, pbox, top_frac, bot_frac, frame_h):
 
 # ── temporal PPE smoother ──────────────────────────────────────────────────────
 
-class PersonTracker:
+class PPESmoother:
+    """Temporal PPE smoother keyed by ByteTrack IDs — no IoU matching needed."""
     def __init__(self):
         self.tracks = {}
-        self._next  = 0
 
-    def update(self, detections):
-        """detections: list of (box, helmet, vest, off_floor, kps)"""
-        matched = set()
-        results = []
+    def update(self, tid, helmet, vest, off_floor):
         now = time.time()
-        for box, h, v, off, kps in detections:
-            best_id, best_s = None, IOU_MATCH
-            for tid, t in self.tracks.items():
-                s = iou(box, t["box"])
-                if s > best_s:
-                    best_s, best_id = s, tid
-            if best_id is None:
-                best_id = self._next
-                self._next += 1
-                self.tracks[best_id] = {"box":       box,
-                                        "helmet":    deque(maxlen=SMOOTH_FRAMES),
-                                        "vest":      deque(maxlen=SMOOTH_FRAMES),
-                                        "off_floor": deque(maxlen=SMOOTH_FRAMES),
-                                        "off_since": None}
-            t = self.tracks[best_id]
-            t["box"] = box
-            t["helmet"].append(h)
-            t["vest"].append(v)
-            t["off_floor"].append(off)
-            matched.add(best_id)
+        if tid not in self.tracks:
+            self.tracks[tid] = {
+                "helmet":    deque(maxlen=SMOOTH_FRAMES),
+                "vest":      deque(maxlen=SMOOTH_FRAMES),
+                "off_floor": deque(maxlen=SMOOTH_FRAMES),
+                "off_since": None,
+            }
+        t = self.tracks[tid]
+        t["helmet"].append(helmet)
+        t["vest"].append(vest)
+        t["off_floor"].append(off_floor)
 
-            raw_off = _vote_bool(t["off_floor"])
-            if raw_off:
-                if t["off_since"] is None:
-                    t["off_since"] = now
-                sustained = (now - t["off_since"]) >= FEET_MIN_DURATION
-            else:
-                t["off_since"] = None
-                sustained = False
+        raw_off = _vote_bool(t["off_floor"])
+        if raw_off:
+            if t["off_since"] is None:
+                t["off_since"] = now
+            sustained = (now - t["off_since"]) >= FEET_MIN_DURATION
+        else:
+            t["off_since"] = None
+            sustained = False
 
-            results.append((best_id, box, _vote(t["helmet"]), _vote(t["vest"]), sustained, kps))
-        self.tracks = {k: v for k, v in self.tracks.items() if k in matched}
-        return results
+        return _vote(t["helmet"]), _vote(t["vest"]), sustained
+
+    def cleanup(self, active_ids):
+        for k in [k for k in self.tracks if k not in active_ids]:
+            del self.tracks[k]
 
 def _vote(hist):
     c = {}
@@ -342,7 +340,7 @@ def run(source):
     h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     print(f"[INFO] Stream: {w}x{h}")
 
-    tracker     = PersonTracker()
+    smoother    = PPESmoother()
     last_logged = {}   # "P{n}_{violation}" → epoch seconds of last log
 
     def should_log(pid, violation):
@@ -359,12 +357,16 @@ def run(source):
             time.sleep(0.01)
             continue
 
-        pose_res = pose_model(frame, verbose=False, conf=PERSON_CONF)[0]
+        pose_res = pose_model.track(frame, persist=True, tracker="bytetrack",
+                                    verbose=False, conf=PERSON_CONF)[0]
 
-        raw_detections = []
-
+        # Build candidate list, then drop heavily-overlapping (merged) boxes
+        candidates = []
         for i, box in enumerate(pose_res.boxes):
             if int(box.cls) != 0:
+                continue
+            tid = int(box.id[0]) if box.id is not None else None
+            if tid is None:
                 continue
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             x1, y1 = max(0, x1), max(0, y1)
@@ -372,21 +374,30 @@ def run(source):
             bh, bw  = y2 - y1, x2 - x1
             if bw == 0 or bh < MIN_BOX_HEIGHT or bh / max(bw, 1) < MIN_ASPECT:
                 continue
+            candidates.append((float(box.conf), tid, (x1, y1, x2, y2), i))
 
-            pbox = (x1, y1, x2, y2)
+        candidates = suppress_merged_boxes(candidates)
+
+        active_ids     = set()
+        results        = []
+        for conf, tid, pbox, i in candidates:
             kps  = pose_res.keypoints[i] if pose_res.keypoints is not None else None
             rear = is_rear_facing(kps)
 
             helmet       = check_helmet(frame, pbox, ppe_model, ppe_names, h, rear)
             vest         = check_vest(frame, pbox, ppe_model, ppe_names, h, rear)
             off_floor, _ = check_feet(pbox, kps)
-            raw_detections.append((pbox, helmet, vest, off_floor, kps))
 
-        smoothed     = tracker.update(raw_detections)
+            s_helmet, s_vest, sustained = smoother.update(tid, helmet, vest, off_floor)
+            active_ids.add(tid)
+            results.append((tid, pbox, s_helmet, s_vest, sustained, kps))
+
+        smoother.cleanup(active_ids)
+
         ppe_violations = 0
         feet_alerts    = 0
 
-        for tid, box, helmet, vest, off_floor, kps in smoothed:
+        for tid, box, helmet, vest, off_floor, kps in results:
             pid = tid
             draw_person(frame, box, helmet, vest, off_floor, kps, pid)
 
@@ -416,7 +427,7 @@ def run(source):
             cv2.putText(frame, f"PPE VIOLATION - {ppe_violations} person(s) missing PPE",
                         (10, banner_y + 32), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2)
 
-        cv2.putText(frame, f"People: {len(smoothed)}", (10, h - 15),
+        cv2.putText(frame, f"People: {len(results)}", (10, h - 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
         cv2.putText(frame, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     (w - 220, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1)
