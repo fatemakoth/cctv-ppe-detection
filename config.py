@@ -7,9 +7,9 @@ CREDENTIALS_FILE = "credentials.json"   # Google Sheets service account key
 SHEET_NAME       = "PPE Incidents"      # name of the Google Sheet to log into
 
 # ── Person detection ──────────────────────────────────────────────────────────
-PERSON_CONF    = 0.50   # minimum confidence to accept a person detection
-MIN_BOX_HEIGHT = 80     # px — boxes shorter than this are skipped (too far / partial)
-MIN_ASPECT     = 0.6    # height/width — filters out horizontal / lying-down detections
+PERSON_CONF    = 0.40   # minimum confidence to accept a person detection
+MIN_BOX_HEIGHT = 40     # px — boxes shorter than this are skipped (too far / partial)
+MIN_ASPECT     = 0.4    # height/width — filters out horizontal / lying-down detections
 
 # ── PPE detection confidence ──────────────────────────────────────────────────
 HELMET_OK_CONF      = 0.70   # confidence needed to confirm helmet present
