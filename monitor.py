@@ -235,7 +235,7 @@ class PersonTracker:
                 t["off_since"] = None
                 sustained = False
 
-            results.append((box, _vote(t["helmet"]), _vote(t["vest"]), sustained, kps))
+            results.append((best_id, box, _vote(t["helmet"]), _vote(t["vest"]), sustained, kps))
         self.tracks = {k: v for k, v in self.tracks.items() if k in matched}
         return results
 
@@ -450,8 +450,8 @@ def run(source):
         ppe_violations = 0
         feet_alerts    = 0
 
-        for idx, (box, helmet, vest, off_floor, kps) in enumerate(smoothed):
-            pid = idx + 1
+        for tid, box, helmet, vest, off_floor, kps in smoothed:
+            pid = tid
             draw_person(frame, box, helmet, vest, off_floor, kps, pid)
 
             if off_floor:
