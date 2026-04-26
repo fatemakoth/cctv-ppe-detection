@@ -30,10 +30,16 @@ POSE_MODEL     = "yolov8n-pose.pt"
 PPE_MODEL_PATH = "ppe_model/ppe_best.pt"
 
 PERSON_CONF    = 0.50
-HELMET_OK_CONF = 0.70
-HELMET_NO_CONF = 0.30
-VEST_OK_CONF   = 0.65
-VEST_NO_CONF   = 0.30
+HELMET_OK_CONF      = 0.70
+HELMET_NO_CONF      = 0.30
+HELMET_NO_CONF_REAR = 0.55  # stricter — need more confidence to declare missing from behind
+VEST_OK_CONF        = 0.65
+VEST_NO_CONF        = 0.30
+VEST_NO_CONF_REAR   = 0.50
+
+# Rear-facing detection via nose keypoint
+NOSE_KP       = 0
+REAR_CONF_MIN = 0.30   # nose confidence below this → person likely facing away
 
 MIN_BOX_HEIGHT = 80
 MIN_ASPECT     = 0.6
@@ -204,31 +210,38 @@ def _vote_bool(hist):
 
 # ── PPE detection ──────────────────────────────────────────────────────────────
 
-def check_helmet(frame, pbox, ppe_model, ppe_names, frame_h):
+def is_rear_facing(kps):
+    if kps is None or kps.data is None or len(kps.data) == 0:
+        return False
+    return float(kps.data[0][NOSE_KP][2]) < REAR_CONF_MIN
+
+def check_helmet(frame, pbox, ppe_model, ppe_names, frame_h, rear_facing=False):
     crop = region_crop(frame, pbox, HEAD_TOP, HEAD_BOT, frame_h)
     if crop is None:
-        return "MISSING"
+        return "OK" if rear_facing else "MISSING"
     best_yes = best_no = 0.0
     for box in ppe_model(crop, verbose=False, conf=HELMET_NO_CONF)[0].boxes:
         cls = ppe_names[int(box.cls)]; conf = float(box.conf)
         if cls == HAS_HELMET: best_yes = max(best_yes, conf)
         if cls == NO_HELMET:  best_no  = max(best_no,  conf)
-    if best_no  >= HELMET_NO_CONF: return "MISSING"
     if best_yes >= HELMET_OK_CONF: return "OK"
-    return "MISSING"
+    no_thresh = HELMET_NO_CONF_REAR if rear_facing else HELMET_NO_CONF
+    if best_no >= no_thresh:       return "MISSING"
+    return "OK" if rear_facing else "MISSING"
 
-def check_vest(frame, pbox, ppe_model, ppe_names, frame_h):
+def check_vest(frame, pbox, ppe_model, ppe_names, frame_h, rear_facing=False):
     crop = region_crop(frame, pbox, TORSO_TOP, TORSO_BOT, frame_h)
     if crop is None:
-        return "MISSING"
+        return "OK" if rear_facing else "MISSING"
     best_yes = best_no = 0.0
     for box in ppe_model(crop, verbose=False, conf=VEST_NO_CONF)[0].boxes:
         cls = ppe_names[int(box.cls)]; conf = float(box.conf)
         if cls == HAS_VEST: best_yes = max(best_yes, conf)
         if cls == NO_VEST:  best_no  = max(best_no,  conf)
-    if best_no  >= VEST_NO_CONF:  return "MISSING"
-    if best_yes >= VEST_OK_CONF:  return "OK"
-    return "MISSING"
+    if best_yes >= VEST_OK_CONF: return "OK"
+    no_thresh = VEST_NO_CONF_REAR if rear_facing else VEST_NO_CONF
+    if best_no >= no_thresh:     return "MISSING"
+    return "OK" if rear_facing else "MISSING"
 
 
 # ── feet-off-floor detection ───────────────────────────────────────────────────
@@ -278,6 +291,7 @@ def draw_ankle_dots(frame, kps, off_floor):
 
 def draw_person(frame, box, helmet, vest, off_floor, kps, pid):
     x1, y1, x2, y2 = box
+    rear      = is_rear_facing(kps)
     ppe_ok    = helmet == "OK" and vest == "OK"
     ppe_alert = off_floor and not ppe_ok   # PPE alert only matters when elevated
 
@@ -290,10 +304,12 @@ def draw_person(frame, box, helmet, vest, off_floor, kps, pid):
 
     cv2.rectangle(frame, (x1, y1), (x2, y2), bc, 2)
 
+    pid_label = f"P{pid} [REAR]" if rear else f"P{pid}"
+    ppe_col   = (180, 180, 180) if rear or not off_floor else None
     for i, (txt, col) in enumerate([
-        (f"P{pid}",           bc),
-        (f"Helmet: {helmet}", _ppe_col(helmet) if off_floor else (180, 180, 180)),
-        (f"Vest  : {vest}",   _ppe_col(vest)   if off_floor else (180, 180, 180)),
+        (pid_label,           bc),
+        (f"Helmet: {helmet}", ppe_col or _ppe_col(helmet)),
+        (f"Vest  : {vest}",   ppe_col or _ppe_col(vest)),
     ]):
         cv2.putText(frame, txt, (x1, y1 - 10 - i * 18),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.52, col, 2)
@@ -359,9 +375,10 @@ def run(source):
 
             pbox = (x1, y1, x2, y2)
             kps  = pose_res.keypoints[i] if pose_res.keypoints is not None else None
+            rear = is_rear_facing(kps)
 
-            helmet    = check_helmet(frame, pbox, ppe_model, ppe_names, h)
-            vest      = check_vest(frame, pbox, ppe_model, ppe_names, h)
+            helmet       = check_helmet(frame, pbox, ppe_model, ppe_names, h, rear)
+            vest         = check_vest(frame, pbox, ppe_model, ppe_names, h, rear)
             off_floor, _ = check_feet(pbox, kps)
             raw_detections.append((pbox, helmet, vest, off_floor, kps))
 
