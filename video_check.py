@@ -216,7 +216,7 @@ def run(video_path, show, skip_frames):
               f"ETA {eta:.0f}s  violations={total_ppe_events+total_feet_events}",
               end="", flush=True)
 
-        pose_res = pose_model(frame, verbose=False, conf=PERSON_CONF)[0]
+        pose_res = pose_model(frame, verbose=False, conf=PERSON_CONF, imgsz=DETECTION_IMGSZ)[0]
 
         raw = []
         for i, box in enumerate(pose_res.boxes):

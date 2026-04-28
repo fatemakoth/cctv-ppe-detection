@@ -1,0 +1,6 @@
+tracker_type: bytetrack
+track_high_thresh: 0.40   # match PERSON_CONF — high-confidence detections
+track_low_thresh:  0.10   # low-confidence detections used for re-association only
+new_track_thresh:  0.40   # minimum confidence to start a new track (was 0.6 — caused startup delay)
+track_buffer:      30     # frames to keep a lost track before dropping it
+match_thresh:      0.80   # IoU threshold for matching detections to existing tracks

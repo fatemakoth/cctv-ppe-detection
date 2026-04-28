@@ -333,8 +333,8 @@ def run(source):
             time.sleep(0.01)
             continue
 
-        pose_res = pose_model.track(frame, persist=True, tracker="bytetrack",
-                                    verbose=False, conf=PERSON_CONF)[0]
+        pose_res = pose_model.track(frame, persist=True, tracker="bytetrack_custom.yaml",
+                                    verbose=False, conf=PERSON_CONF, imgsz=DETECTION_IMGSZ)[0]
 
         # Build candidate list, then drop heavily-overlapping (merged) boxes
         candidates = []
