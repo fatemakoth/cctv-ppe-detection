@@ -20,7 +20,8 @@ VEST_OK_CONF        = 0.65
 VEST_NO_CONF        = 0.30
 VEST_NO_CONF_REAR   = 0.50
 
-# ── PPE class names — must exactly match your model's output labels ────────────
+# ── PPE class names — must exactly match y
+# our model's output labels ────────────
 HAS_HELMET = "Hardhat"
 NO_HELMET  = "NO-Hardhat"
 HAS_VEST   = "Safety Vest"
@@ -31,9 +32,9 @@ HEAD_TOP  = 0.00;  HEAD_BOT  = 0.30   # head region for helmet check
 TORSO_TOP = 0.15;  TORSO_BOT = 0.70   # torso region for vest check
 
 # ── Temporal smoothing ────────────────────────────────────────────────────────
-SMOOTH_FRAMES  = 10   # rolling window size (frames)
-OK_THRESH      = 6    # votes in window needed to confirm OK
-MISSING_THRESH = 4    # votes in window needed to confirm MISSING
+SMOOTH_WINDOW_SEC = 2.0   # seconds of history to keep — works at any FPS
+OK_RATIO          = 0.60  # proportion of window that must be OK to confirm OK
+MISSING_RATIO     = 0.40  # proportion that must be MISSING to confirm MISSING
 
 # ── Tracking ──────────────────────────────────────────────────────────────────
 MERGE_IOU_THRESH = 0.60   # IoU above this → duplicate box, drop lower-confidence one

@@ -99,25 +99,32 @@ def region_crop(frame, pbox, top_frac, bot_frac, frame_h):
 # ── temporal PPE smoother ──────────────────────────────────────────────────────
 
 class PPESmoother:
-    """Temporal PPE smoother keyed by ByteTrack IDs — no IoU matching needed."""
+    """
+    Time-based PPE smoother — keeps the last SMOOTH_WINDOW_SEC seconds of detections.
+    Works correctly at any FPS: low FPS gets fewer frames in the window but the same
+    time coverage, so decisions are made as quickly as possible at any frame rate.
+    """
     def __init__(self):
         self.tracks = {}
 
     def update(self, tid, helmet, vest, off_floor):
-        now = time.time()
+        now    = time.time()
+        cutoff = now - SMOOTH_WINDOW_SEC
         if tid not in self.tracks:
             self.tracks[tid] = {
-                "helmet":       deque(maxlen=SMOOTH_FRAMES),
-                "vest":         deque(maxlen=SMOOTH_FRAMES),
-                "off_floor":    deque(maxlen=SMOOTH_FRAMES),
-                "off_since":    None,
-                "prev_helmet":  None,
-                "prev_vest":    None,
+                "helmet":      [],   # list of (timestamp, value)
+                "vest":        [],
+                "off_floor":   [],
+                "off_since":   None,
+                "prev_helmet": None,
+                "prev_vest":   None,
             }
         t = self.tracks[tid]
-        t["helmet"].append(helmet)
-        t["vest"].append(vest)
-        t["off_floor"].append(off_floor)
+
+        # Append and prune entries older than the window
+        for key, val in [("helmet", helmet), ("vest", vest), ("off_floor", off_floor)]:
+            t[key].append((now, val))
+            t[key] = [(ts, v) for ts, v in t[key] if ts > cutoff]
 
         raw_off = _vote_bool(t["off_floor"])
         if raw_off:
@@ -131,7 +138,6 @@ class PPESmoother:
         s_helmet = _vote(t["helmet"])
         s_vest   = _vote(t["vest"])
 
-        # Detect removal: previously confirmed OK, now confirmed MISSING
         h_removed = t["prev_helmet"] == "OK" and s_helmet == "MISSING"
         v_removed = t["prev_vest"]   == "OK" and s_vest   == "MISSING"
         t["prev_helmet"] = s_helmet
@@ -144,16 +150,22 @@ class PPESmoother:
             del self.tracks[k]
 
 def _vote(hist):
+    """hist: list of (timestamp, value). Votes by proportion — FPS-independent."""
+    vals = [v for _, v in hist]
+    if not vals:
+        return "MISSING"
+    n = len(vals)
     c = {}
-    for s in hist: c[s] = c.get(s, 0) + 1
-    if c.get("UNVERIFIABLE", 0) > len(hist) // 2: return "UNVERIFIABLE"
-    if c.get("OK", 0) >= OK_THRESH:               return "OK"
-    if c.get("MISSING", 0) >= MISSING_THRESH:      return "MISSING"
+    for v in vals: c[v] = c.get(v, 0) + 1
+    if c.get("UNVERIFIABLE", 0) / n > 0.5:  return "UNVERIFIABLE"
+    if c.get("OK",           0) / n >= OK_RATIO:      return "OK"
+    if c.get("MISSING",      0) / n >= MISSING_RATIO: return "MISSING"
     return "MISSING"
 
 def _vote_bool(hist):
-    """Declare off-floor when OFF_FLOOR_THRESH or more of recent frames detected it."""
-    return sum(1 for x in hist if x) >= OFF_FLOOR_THRESH
+    """hist: list of (timestamp, value). Returns True if majority of recent frames are True."""
+    vals = [v for _, v in hist]
+    return vals.count(True) / max(len(vals), 1) >= 0.5
 
 
 # ── PPE detection ──────────────────────────────────────────────────────────────
