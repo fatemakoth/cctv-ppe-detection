@@ -229,8 +229,8 @@ def run(video_path, show, skip_frames):
 
             pbox = (x1,y1,x2,y2)
             kps  = pose_res.keypoints[i] if pose_res.keypoints is not None else None
-            helmet   = check_helmet(frame, pbox, ppe_model, ppe_names, H)
-            vest     = check_vest(frame, pbox, ppe_model, ppe_names, H)
+            helmet    = check_helmet(frame, pbox, ppe_model, ppe_names, H)
+            vest      = check_vest(frame, pbox, ppe_model, ppe_names, H)
             off_floor = check_feet(pbox, kps)
             raw.append((pbox, helmet, vest, off_floor))
 

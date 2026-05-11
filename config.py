@@ -9,7 +9,7 @@ SHEET_NAME       = "PPE Incidents"      # name of the Google Sheet to log into
 # ── Person detection ──────────────────────────────────────────────────────────
 PERSON_CONF      = 0.40    # minimum confidence to accept a person detection
 DETECTION_IMGSZ  = 1280   # inference resolution — higher catches far-away people (640=fast, 1280=accurate)
-MIN_BOX_HEIGHT = 30     # px — boxes shorter than this are skipped (too far / partial)
+MIN_BOX_HEIGHT = 25     # px — boxes shorter than this are skipped (too far / partial)
 MIN_ASPECT     = 0.4    # height/width — filters out horizontal / lying-down detections
 
 # ── PPE detection confidence ──────────────────────────────────────────────────
@@ -32,9 +32,13 @@ HEAD_TOP  = 0.00;  HEAD_BOT  = 0.30   # head region for helmet check
 TORSO_TOP = 0.15;  TORSO_BOT = 0.70   # torso region for vest check
 
 # ── Temporal smoothing ────────────────────────────────────────────────────────
-SMOOTH_WINDOW_SEC = 2.0   # seconds of history to keep — works at any FPS
+SMOOTH_WINDOW_SEC = 2.0   # seconds of history — used by monitor.py (live stream, any FPS)
 OK_RATIO          = 0.60  # proportion of window that must be OK to confirm OK
 MISSING_RATIO     = 0.40  # proportion that must be MISSING to confirm MISSING
+
+SMOOTH_FRAMES  = 10   # frame-count window — used by video_check.py (FPS is always known)
+OK_THRESH      = 6    # votes needed to confirm OK
+MISSING_THRESH = 4    # votes needed to confirm MISSING
 
 # ── Tracking ──────────────────────────────────────────────────────────────────
 MERGE_IOU_THRESH = 0.60   # IoU above this → duplicate box, drop lower-confidence one
